@@ -27,7 +27,6 @@ def check_single_instance():
                     pid = int(file_handle.read().strip())
                 try:
                     os.kill(pid, 0)
-
                     return False, None
                 except:
                     lock_file_path.unlink()
@@ -41,11 +40,13 @@ def check_single_instance():
     except:
         return True, None
 
+
 def get_library_path():
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "library"
     else:
         return Path(__file__).resolve().parent.parent / "library"
+
 
 library_path = get_library_path()
 sys.path.insert(0, str(library_path))
@@ -111,7 +112,6 @@ class DeviceManager:
             if label and label.winfo_exists():
                 if text is not None:
                     label.config(text=text)
-
                 if foreground is not None:
                     label.config(foreground=foreground)
         except:
@@ -123,6 +123,54 @@ class DeviceManager:
             self._safe_widget_configuration(button, state=state)
 
 
+    def _safe_get_float(self, entry, min_value=None, max_value=None, error_message="Введите корректное число!"):
+        try:
+            value = entry.get().strip()
+            if not value:
+                return None
+            number = float(value)
+            if min_value is not None and number < min_value:
+                def show_error():
+                    messagebox.showerror("Ошибка ввода", f"Значение должно быть не меньше {min_value}!")
+                self.root_window.after(0, show_error)
+                return None
+            if max_value is not None and number > max_value:
+                def show_error():
+                    messagebox.showerror("Ошибка ввода", f"Значение должно быть не больше {max_value}!")
+                self.root_window.after(0, show_error)
+                return None
+            return number
+        except ValueError:
+            def show_error():
+                messagebox.showerror("Ошибка ввода", error_message)
+            self.root_window.after(0, show_error)
+            return None
+
+
+    def _safe_get_int(self, entry, min_value=None, max_value=None, error_message="Введите корректное целое число!"):
+        try:
+            value = entry.get().strip()
+            if not value:
+                return None
+            number = int(value)
+            if min_value is not None and number < min_value:
+                def show_error():
+                    messagebox.showerror("Ошибка ввода", f"Значение должно быть не меньше {min_value}!")
+                self.root_window.after(0, show_error)
+                return None
+            if max_value is not None and number > max_value:
+                def show_error():
+                    messagebox.showerror("Ошибка ввода", f"Значение должно быть не больше {max_value}!")
+                self.root_window.after(0, show_error)
+                return None
+            return number
+        except ValueError:
+            def show_error():
+                messagebox.showerror("Ошибка ввода", error_message)
+            self.root_window.after(0, show_error)
+            return None
+
+
     def update_chromator_status(self):
         with self.update_lock:
             if not self.chromator_connected or not self.chromator_device:
@@ -130,9 +178,8 @@ class DeviceManager:
                 self._safe_label_configuration(self.status_labels.get("chromator_input_slit"), text="--- мкм")
                 self._safe_label_configuration(self.status_labels.get("chromator_output_slit"), text="--- мкм")
                 self._safe_label_configuration(self.status_labels.get("chromator_shutter"), text="---", foreground="black")
-                self._safe_label_configuration(self.status_labels.get("chromator_grating"), text="-")
-                self._safe_label_configuration(self.status_labels.get("chromator_grating_count"), text="0")
-
+                self._safe_label_configuration(self.status_labels.get("chromator_grating"), text="---")
+                self._safe_label_configuration(self.status_labels.get("chromator_grating_count"), text="---")
                 return
 
             try:
@@ -172,7 +219,6 @@ class DeviceManager:
                 self._safe_label_configuration(self.status_labels.get("laser_speed"), text="---")
                 self._safe_label_configuration(self.status_labels.get("laser_motor"), text="---", foreground="black")
                 self._safe_label_configuration(self.status_labels.get("laser_shutter"), text="---", foreground="black")
-
                 return
 
             try:
@@ -214,7 +260,6 @@ class DeviceManager:
                 self._safe_label_configuration(self.status_labels.get("oscilloscope_timebase"), text="--- с/дел")
                 self._safe_label_configuration(self.status_labels.get("oscilloscope_acquisition_type"), text="---")
                 self._safe_label_configuration(self.status_labels.get("oscilloscope_average"), text="---")
-
                 return
 
             try:
@@ -257,7 +302,6 @@ class DeviceManager:
                 self._safe_label_configuration(self.status_labels.get("energymeter_scale"), text="---")
                 self._safe_label_configuration(self.status_labels.get("energymeter_autoscale"), text="---", foreground="black")
                 self._safe_label_configuration(self.status_labels.get("energymeter_wavelength"), text="--- нм")
-
                 return
 
             try:
@@ -612,13 +656,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                wavelength = float(entry.get())
-                self.chromator_device.set_wavelength(wavelength)
-                time.sleep(0.3)
-                self.update_chromator_status()
-            except:
-                pass
+            wavelength = self._safe_get_float(entry, min_value=0, error_message="Введите корректное число для длины волны (нм)!")
+            if wavelength is None:
+                return
+            self.chromator_device.set_wavelength(wavelength)
+            time.sleep(0.3)
+            self.update_chromator_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -628,12 +671,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                width = float(entry.get())
-                self.chromator_device.set_slit_width(0, width)
-                self.update_chromator_status()
-            except:
-                pass
+            width = self._safe_get_float(entry, min_value=0, error_message="Введите корректное число для ширины щели (мкм)!")
+            if width is None:
+                return
+            self.chromator_device.set_slit_width(0, width)
+            self.update_chromator_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -643,14 +685,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                width = float(entry.get())
-
-                if self.chromator_device.get_slit_count() > 1:
-                    self.chromator_device.set_slit_width(1, width)
-                    self.update_chromator_status()
-            except:
-                pass
+            width = self._safe_get_float(entry, min_value=0, error_message="Введите корректное число для ширины щели (мкм)!")
+            if width is None:
+                return
+            if self.chromator_device.get_slit_count() > 1:
+                self.chromator_device.set_slit_width(1, width)
+                self.update_chromator_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -677,8 +717,14 @@ class DeviceManager:
         if self.chromator_connected:
             try:
                 grating_index = int(spinbox.get())
-                self.chromator_device.set_active_grating(grating_index)
-                self.update_chromator_status()
+                grating_count = self.chromator_device.get_grating_count()
+                if 0 <= grating_index < grating_count:
+                    self.chromator_device.set_active_grating(grating_index)
+                    self.update_chromator_status()
+                else:
+                    def show_error():
+                        messagebox.showerror("Ошибка", f"Номер решётки должен быть от 0 до {grating_count - 1}!")
+                    self.root_window.after(0, show_error)
             except:
                 pass
 
@@ -718,13 +764,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                wavelength = float(entry.get())
-                self.laser_source_device.set_wavelength(wavelength)
-                time.sleep(0.3)
-                self.update_laser_status()
-            except:
-                pass
+            wavelength = self._safe_get_float(entry, min_value=0, error_message="Введите корректное число для длины волны (нм)!")
+            if wavelength is None:
+                return
+            self.laser_source_device.set_wavelength(wavelength)
+            time.sleep(0.3)
+            self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -734,13 +779,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                position = int(entry.get())
-                self.laser_source_device.set_absolute_position(1, position)
-                time.sleep(0.3)
-                self.update_laser_status()
-            except:
-                pass
+            position = self._safe_get_int(entry, error_message="Введите корректное целое число для положения (шаги)!")
+            if position is None:
+                return
+            self.laser_source_device.set_absolute_position(1, position)
+            time.sleep(0.3)
+            self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -750,13 +794,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                steps = int(entry.get())
-                self.laser_source_device.set_relative_position(1, steps)
-                time.sleep(0.3)
-                self.update_laser_status()
-            except:
-                pass
+            steps = self._safe_get_int(entry, error_message="Введите корректное целое число для смещения (шаги)!")
+            if steps is None:
+                return
+            self.laser_source_device.set_relative_position(1, steps)
+            time.sleep(0.3)
+            self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -766,12 +809,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                speed = int(entry.get())
-                self.laser_source_device.set_speed(1, speed)
-                self.update_laser_status()
-            except:
-                pass
+            speed = self._safe_get_int(entry, min_value=1, error_message="Введите корректное число для скорости (шаги/с)!")
+            if speed is None:
+                return
+            self.laser_source_device.set_speed(1, speed)
+            self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -826,13 +868,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                channel = int(self.oscilloscope_channel_variable.get())
-                scale = float(entry.get())
-                self.oscilloscope_device.set_channel_scale(channel, scale)
-                self.update_oscilloscope_status()
-            except:
-                pass
+            scale = self._safe_get_float(entry, min_value=0.001, error_message="Введите корректное число для масштаба (В/дел)!")
+            if scale is None:
+                return
+            channel = int(self.oscilloscope_channel_variable.get())
+            self.oscilloscope_device.set_channel_scale(channel, scale)
+            self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -842,13 +883,12 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                channel = int(self.oscilloscope_channel_variable.get())
-                offset = float(entry.get())
-                self.oscilloscope_device.set_channel_offset(channel, offset)
-                self.update_oscilloscope_status()
-            except:
-                pass
+            offset = self._safe_get_float(entry, error_message="Введите корректное число для смещения (В)!")
+            if offset is None:
+                return
+            channel = int(self.oscilloscope_channel_variable.get())
+            self.oscilloscope_device.set_channel_offset(channel, offset)
+            self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -889,12 +929,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                timebase = float(entry.get())
-                self.oscilloscope_device.set_timebase_scale(timebase)
-                self.update_oscilloscope_status()
-            except:
-                pass
+            timebase = self._safe_get_float(entry, min_value=1e-9, error_message="Введите корректное число для масштаба времени (с/дел)!")
+            if timebase is None:
+                return
+            self.oscilloscope_device.set_timebase_scale(timebase)
+            self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -904,12 +943,13 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                average_count = int(entry.get())
-                self.oscilloscope_device.set_average_count(average_count)
-                self.update_oscilloscope_status()
-            except:
-                pass
+            average_count = self._safe_get_int(entry, min_value=1, max_value=65536, error_message="Введите корректное число кадров!")
+
+            if average_count is None:
+                return
+
+            self.oscilloscope_device.set_average_count(average_count)
+            self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -929,12 +969,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                level = float(entry.get())
-                self.oscilloscope_device.set_trigger_level(level)
-                self.update_oscilloscope_status()
-            except:
-                pass
+            level = self._safe_get_float(entry, error_message="Введите корректное число для уровня триггера (В)!")
+            if level is None:
+                return
+            self.oscilloscope_device.set_trigger_level(level)
+            self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1043,7 +1082,6 @@ class DeviceManager:
                         break
                 except:
                     time.sleep(0.5)
-
                     continue
 
             return time_values, voltage_values
@@ -1143,7 +1181,6 @@ class DeviceManager:
                         messagebox.showwarning("Предупреждение", "Не удалось захватить сигнал!")
 
                     self.root_window.after(0, show_error)
-
                     return
 
                 saved_files = []
@@ -1272,13 +1309,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                scale_index = int(entry.get())
-                if 0 <= scale_index <= 41:
-                    self.energymeter_device.set_scale(scale_index)
-                    self.update_energymeter_status()
-            except:
-                pass
+            scale_index = self._safe_get_int(entry, min_value=0, max_value=41, error_message="Введите число от 0 до 41!")
+            if scale_index is None:
+                return
+            self.energymeter_device.set_scale(scale_index)
+            self.update_energymeter_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1306,12 +1341,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                wavelength = int(entry.get())
-                self.energymeter_device.set_wavelength_nanometers(wavelength)
-                self.update_energymeter_status()
-            except:
-                pass
+            wavelength = self._safe_get_int(entry, min_value=0, error_message="Введите корректное число для длины волны (нм)!")
+            if wavelength is None:
+                return
+            self.energymeter_device.set_wavelength_nanometers(wavelength)
+            self.update_energymeter_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1330,13 +1364,11 @@ class DeviceManager:
             return
 
         def task():
-            try:
-                level = float(entry.get())
-                if 0.1 <= level <= 99.9:
-                    self.energymeter_device.set_trigger_level(level)
-                    self.update_energymeter_status()
-            except:
-                pass
+            level = self._safe_get_float(entry, min_value=0.1, max_value=99.9, error_message="Введите число от 0.1 до 99.9!")
+            if level is None:
+                return
+            self.energymeter_device.set_trigger_level(level)
+            self.update_energymeter_status()
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1405,11 +1437,11 @@ class DeviceManager:
         self.status_labels["chromator_shutter"].grid(row=4, column=1, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Активная решётка:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["chromator_grating"] = ttk.Label(grid, text="-")
+        self.status_labels["chromator_grating"] = ttk.Label(grid, text="---")
         self.status_labels["chromator_grating"].grid(row=5, column=1, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Всего решёток:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["chromator_grating_count"] = ttk.Label(grid, text="0")
+        self.status_labels["chromator_grating_count"] = ttk.Label(grid, text="---")
         self.status_labels["chromator_grating_count"].grid(row=6, column=1, sticky="w", padx=5, pady=2)
 
         control_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
@@ -1455,8 +1487,8 @@ class DeviceManager:
         filter_center = ttk.Frame(filter_frame)
         filter_center.pack(anchor="center")
         ttk.Label(filter_center, text="Фильтр:").pack(side=tk.LEFT, padx=5)
-        filter_combobox = ttk.Combobox(filter_center, values=["0 - Без фильтра", "1 - Фильтр 1", "2 - Фильтр 2"], width=20, state="readonly")
-        filter_combobox.set("0 - Без фильтра")
+        filter_combobox = ttk.Combobox(filter_center, values=["Без фильтра", "Фильтр 1", "Фильтр 2"], width=20, state="readonly")
+        filter_combobox.set("Без фильтра")
         filter_combobox.pack(side=tk.LEFT, padx=5)
         ttk.Button(filter_center, text="Установить", width=14, command=lambda: self.set_chromator_filter(filter_combobox)).pack(side=tk.LEFT, padx=5)
 
@@ -1535,12 +1567,12 @@ class DeviceManager:
         wavelength_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_laser_wavelength(wavelength_entry)).grid(row=0, column=2, padx=5, pady=2)
 
-        ttk.Label(control_frame, text="Абсолютное положение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Абсолютное положение (шаги):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         absolute_entry = ttk.Entry(control_frame, width=16)
         absolute_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_laser_absolute_position(absolute_entry)).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(control_frame, text="Относительное смещение:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Относительное смещение (шаги):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         relative_entry = ttk.Entry(control_frame, width=16)
         relative_entry.grid(row=2, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Переместить", width=14, command=lambda: self.set_laser_relative_position(relative_entry)).grid(row=2, column=2, padx=5, pady=2)
@@ -1554,8 +1586,8 @@ class DeviceManager:
         motor_frame.grid(row=4, column=0, columnspan=3, pady=5)
         motor_center = ttk.Frame(motor_frame)
         motor_center.pack(anchor="center")
-        ttk.Button(motor_center, text="Включить двигатель", width=18, command=self.enable_laser_motor).pack(side=tk.LEFT, padx=5)
-        ttk.Button(motor_center, text="Отключить двигатель", width=18, command=self.disable_laser_motor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(motor_center, text="Включить двигатель", width=24, command=self.enable_laser_motor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(motor_center, text="Отключить двигатель", width=24, command=self.disable_laser_motor).pack(side=tk.LEFT, padx=5)
 
         shutter_frame = ttk.Frame(control_frame)
         shutter_frame.grid(row=5, column=0, columnspan=3, pady=5)
@@ -1568,7 +1600,7 @@ class DeviceManager:
         reset_frame.grid(row=6, column=0, columnspan=3, pady=5)
         reset_center = ttk.Frame(reset_frame)
         reset_center.pack(anchor="center")
-        ttk.Button(reset_center, text="Сброс (RESET)", width=18, command=self.reset_laser).pack(side=tk.LEFT, padx=5)
+        ttk.Button(reset_center, text="Сброс", width=18, command=self.reset_laser).pack(side=tk.LEFT, padx=5)
 
         return tab
 
@@ -1634,7 +1666,7 @@ class DeviceManager:
         self.status_labels["oscilloscope_acquisition_type"] = ttk.Label(grid, text="---")
         self.status_labels["oscilloscope_acquisition_type"].grid(row=7, column=1, sticky="w", padx=5, pady=2)
 
-        ttk.Label(grid, text="Кол-во кадров:").grid(row=8, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(grid, text="Количество кадров:").grid(row=8, column=0, sticky="w", padx=5, pady=2)
         self.status_labels["oscilloscope_average"] = ttk.Label(grid, text="---")
         self.status_labels["oscilloscope_average"].grid(row=8, column=1, sticky="w", padx=5, pady=2)
 
@@ -1644,12 +1676,12 @@ class DeviceManager:
         control_frame.columnconfigure(1, weight=0)
         control_frame.columnconfigure(2, weight=0)
 
-        ttk.Label(control_frame, text="Вертикальный масштаб:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Вертикальный масштаб (В/дел):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         scale_entry = ttk.Entry(control_frame, width=16)
         scale_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_scale(scale_entry)).grid(row=0, column=2, padx=5, pady=2)
 
-        ttk.Label(control_frame, text="Вертикальное смещение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Вертикальное смещение (В):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         offset_entry = ttk.Entry(control_frame, width=16)
         offset_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_offset(offset_entry)).grid(row=1, column=2, padx=5, pady=2)
@@ -1664,15 +1696,15 @@ class DeviceManager:
         channel_frame.grid(row=3, column=0, columnspan=3, pady=5)
         channel_center = ttk.Frame(channel_frame)
         channel_center.pack(anchor="center")
-        ttk.Button(channel_center, text="Включить канал", width=16, command=self.enable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
-        ttk.Button(channel_center, text="Отключить канал", width=16, command=self.disable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(channel_center, text="Включить канал", width=18, command=self.enable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(channel_center, text="Отключить канал", width=18, command=self.disable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(control_frame, text="Горизонтальный масштаб:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Горизонтальный масштаб (с/дел):").grid(row=4, column=0, sticky="w", padx=5, pady=2)
         timebase_entry = ttk.Entry(control_frame, width=16)
         timebase_entry.grid(row=4, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_timebase(timebase_entry)).grid(row=4, column=2, padx=5, pady=2)
 
-        ttk.Label(control_frame, text="Кол-во кадров:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(control_frame, text="Количество кадров:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
         average_entry = ttk.Entry(control_frame, width=16)
         average_entry.grid(row=5, column=1, sticky="e", padx=5, pady=2)
         ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_average_count(average_entry)).grid(row=5, column=2, padx=5, pady=2)
@@ -1719,15 +1751,15 @@ class DeviceManager:
         ttk.Button(acquisition_center, text="Однократно", width=14, command=self.single_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
         ttk.Button(acquisition_center, text="Принудить", width=14, command=self.force_oscilloscope_trigger).pack(side=tk.LEFT, padx=5)
 
-        capture_frame = ttk.LabelFrame(main_frame, text="Захват сигнала:", padding=10)
+        capture_frame = ttk.LabelFrame(main_frame, text="Сигнал:", padding=10)
         capture_frame.pack(fill=tk.X, pady=5)
 
         average_frame = ttk.Frame(capture_frame)
         average_frame.pack(fill=tk.X, pady=2)
         average_center = ttk.Frame(average_frame)
         average_center.pack(anchor="center")
-        ttk.Label(average_center, text="Кадров для усреднения:").pack(side=tk.LEFT, padx=5)
-        self.oscilloscope_average_spin = ttk.Spinbox(average_center, from_=2, to=1024, width=10)
+        ttk.Label(average_center, text="Число кадров для усреднения:").pack(side=tk.LEFT, padx=5)
+        self.oscilloscope_average_spin = ttk.Spinbox(average_center, from_=2, to=65536, width=10, increment=1)
         self.oscilloscope_average_spin.set("64")
         self.oscilloscope_average_spin.pack(side=tk.LEFT, padx=5)
 
@@ -1736,18 +1768,18 @@ class DeviceManager:
         normal_capture_center = ttk.Frame(normal_capture_frame)
         normal_capture_center.pack(anchor="center")
         ttk.Label(normal_capture_center, text="Обычный:").pack(side=tk.LEFT, padx=5)
-        ttk.Button(normal_capture_center, text="CSV", width=10, command=self.capture_and_save_normal_waveform_csv).pack(side=tk.LEFT, padx=2)
-        ttk.Button(normal_capture_center, text="PNG", width=10, command=self.capture_and_save_normal_waveform_png).pack(side=tk.LEFT, padx=2)
-        ttk.Button(normal_capture_center, text="Оба", width=10, command=self.capture_and_save_normal_waveform).pack(side=tk.LEFT, padx=2)
+        ttk.Button(normal_capture_center, text="Данные", width=10, command=self.capture_and_save_normal_waveform_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(normal_capture_center, text="График", width=10, command=self.capture_and_save_normal_waveform_png).pack(side=tk.LEFT, padx=2)
+        ttk.Button(normal_capture_center, text="Вместе", width=10, command=self.capture_and_save_normal_waveform).pack(side=tk.LEFT, padx=2)
 
         averaged_capture_frame = ttk.Frame(capture_frame)
         averaged_capture_frame.pack(fill=tk.X, pady=2)
         averaged_capture_center = ttk.Frame(averaged_capture_frame)
         averaged_capture_center.pack(anchor="center")
         ttk.Label(averaged_capture_center, text="Усреднённый:").pack(side=tk.LEFT, padx=5)
-        ttk.Button(averaged_capture_center, text="CSV", width=10, command=self.capture_and_save_averaged_waveform_csv).pack(side=tk.LEFT, padx=2)
-        ttk.Button(averaged_capture_center, text="PNG", width=10, command=self.capture_and_save_averaged_waveform_png).pack(side=tk.LEFT, padx=2)
-        ttk.Button(averaged_capture_center, text="Оба", width=10, command=self.capture_and_save_averaged_waveform).pack(side=tk.LEFT, padx=2)
+        ttk.Button(averaged_capture_center, text="Данные", width=10, command=self.capture_and_save_averaged_waveform_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(averaged_capture_center, text="График", width=10, command=self.capture_and_save_averaged_waveform_png).pack(side=tk.LEFT, padx=2)
+        ttk.Button(averaged_capture_center, text="Вместе", width=10, command=self.capture_and_save_averaged_waveform).pack(side=tk.LEFT, padx=2)
 
         return tab
 
@@ -1789,7 +1821,7 @@ class DeviceManager:
         self.status_labels["energymeter_power"].grid(row=1, column=1, sticky="w", padx=5, pady=2)
         ttk.Button(grid, text="Обновить", width=14, command=self.refresh_energymeter_power).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(grid, text="Кол-во измерений:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(grid, text="Количество измерений:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.status_labels["energymeter_average_count"] = tk.StringVar(value="10")
         average_spinbox = ttk.Spinbox(grid, from_=1, to=100, width=14, textvariable=self.status_labels["energymeter_average_count"])
         average_spinbox.grid(row=2, column=1, sticky="w", padx=5, pady=2)
@@ -1821,8 +1853,8 @@ class DeviceManager:
         scale_button_frame.grid(row=0, column=0, columnspan=3, pady=5)
         scale_center = ttk.Frame(scale_button_frame)
         scale_center.pack(anchor="center")
-        ttk.Button(scale_center, text="Увеличить шкалу", width=16, command=self.increase_energymeter_scale).pack(side=tk.LEFT, padx=5)
-        ttk.Button(scale_center, text="Уменьшить шкалу", width=16, command=self.decrease_energymeter_scale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(scale_center, text="Увеличить шкалу", width=24, command=self.increase_energymeter_scale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(scale_center, text="Уменьшить шкалу", width=24, command=self.decrease_energymeter_scale).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(control_frame, text="Индекс шкалы (0-41):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         scale_entry = ttk.Entry(control_frame, width=16)
@@ -1833,8 +1865,8 @@ class DeviceManager:
         autoscale_button_frame.grid(row=2, column=0, columnspan=3, pady=5)
         autoscale_center = ttk.Frame(autoscale_button_frame)
         autoscale_center.pack(anchor="center")
-        ttk.Button(autoscale_center, text="Включить автошкалу", width=18, command=self.enable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
-        ttk.Button(autoscale_center, text="Отключить автошкалу", width=18, command=self.disable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(autoscale_center, text="Включить автошкалу", width=24, command=self.enable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(autoscale_center, text="Отключить автошкалу", width=24, command=self.disable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(control_frame, text="Длина волны (нм):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
         wavelength_entry = ttk.Entry(control_frame, width=16)
@@ -1850,14 +1882,14 @@ class DeviceManager:
         zero_frame.grid(row=5, column=0, columnspan=3, pady=5)
         zero_center = ttk.Frame(zero_frame)
         zero_center.pack(anchor="center")
-        ttk.Button(zero_center, text="Обнулить (Zero)", width=18, command=self.zero_energymeter).pack(side=tk.LEFT, padx=5)
+        ttk.Button(zero_center, text="Обнулить", width=18, command=self.zero_energymeter).pack(side=tk.LEFT, padx=5)
 
         return tab
 
 
     def initialize_user_interface(self):
         self.root_window = tk.Tk()
-        self.root_window.title("Полное управление оборудованием")
+        self.root_window.title("Управление оборудованием")
         self.root_window.geometry("700x1000")
         self.root_window.resizable(False, False)
 
