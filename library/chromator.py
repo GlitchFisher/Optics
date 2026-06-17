@@ -38,9 +38,9 @@ class Chromator:
 
     def connect(self) -> bool:
         connection_status = False
-        
+
         library_path = self._sdk_path / "SolarLS.Sdk.dll"
-        
+
         if library_path.exists():
             self._library_handle = ctypes.CDLL(str(library_path))
 
