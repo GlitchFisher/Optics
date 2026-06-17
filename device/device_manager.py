@@ -1,558 +1,677 @@
-import sys
 import os
+import sys
 import time
+import pyvisa
+import tempfile
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+
 from datetime import datetime
 from pathlib import Path
+from tkinter import filedialog
+from tkinter import messagebox
+from tkinter import ttk
 
-# =====================================================
-# Путь к библиотекам (для сборки в один EXE)
-# =====================================================
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+def check_single_instance():
+    lock_file_path = Path(tempfile.gettempdir()) / "device_manager_running.lock"
+
+    try:
+        if lock_file_path.exists():
+            try:
+                with open(lock_file_path, "r") as file_handle:
+                    pid = int(file_handle.read().strip())
+                try:
+                    os.kill(pid, 0)
+
+                    return False, None
+                except:
+                    lock_file_path.unlink()
+            except:
+                pass
+
+        with open(lock_file_path, "w") as file_handle:
+            file_handle.write(str(os.getpid()))
+
+        return True, lock_file_path
+    except:
+        return True, None
+
 def get_library_path():
-    """Возвращает путь к папке library."""
-    if getattr(sys, 'frozen', False):
-        # Запуск из EXE: библиотеки внутри _MEIPASS
-        return Path(sys._MEIPASS) / 'library'
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "library"
     else:
-        # Запуск из исходного кода: библиотеки в ../library
-        return Path(__file__).resolve().parent.parent / 'library'
+        return Path(__file__).resolve().parent.parent / "library"
 
-# Путь к library
 library_path = get_library_path()
 sys.path.insert(0, str(library_path))
 
-# Пути к sdk и driver (для работы внутри EXE)
-if getattr(sys, 'frozen', False):
-    sdk_path = Path(sys._MEIPASS) / 'sdk'
-    driver_path = Path(sys._MEIPASS) / 'driver'
+if getattr(sys, "frozen", False):
+    sdk_path = Path(sys._MEIPASS) / "sdk"
+    driver_path = Path(sys._MEIPASS) / "driver"
 else:
-    sdk_path = Path(__file__).resolve().parent.parent / 'sdk'
-    driver_path = Path(__file__).resolve().parent.parent / 'driver'
+    sdk_path = Path(__file__).resolve().parent.parent / "sdk"
+    driver_path = Path(__file__).resolve().parent.parent / "driver"
 
-# Импорты библиотек
+
 from chromator import Chromator
+from energymeter import Energymeter
 from laser_source import LaserSource
 from oscilloscope import Oscilloscope
-from powermeter import Powermeter
-
-
-print(f"MEIPASS: {sys._MEIPASS if getattr(sys, 'frozen', False) else 'Not frozen'}")
-print(f"Library path: {library_path}")
-print(f"Exists: {library_path.exists()}")
 
 
 class DeviceManager:
-    """Полноценный менеджер управления всем оборудованием."""
-
     def __init__(self):
-        # Путь к иконке (для EXE)
         if getattr(sys, "frozen", False):
             self.base_path = Path(sys._MEIPASS)
         else:
             self.base_path = Path(__file__).parent
 
-        # Объекты устройств
         self.chromator_device = None
         self.laser_source_device = None
         self.oscilloscope_device = None
-        self.powermeter_device = None
+        self.energymeter_device = None
 
-        # Флаги подключения
         self.chromator_connected = False
         self.laser_connected = False
         self.oscilloscope_connected = False
-        self.powermeter_connected = False
+        self.energymeter_connected = False
 
-        # Управление потоками
         self.auto_update_enabled = True
         self.status_timer = None
         self.operation_lock = threading.Lock()
+        self.update_lock = threading.Lock()
 
-        # GUI
         self.root_window = None
         self.status_labels = {}
-        self.control_buttons = {"chromator": [], "laser": [], "oscilloscope": [], "powermeter": []}
+        self.control_buttons = {
+            "chromator": [],
+            "laser": [],
+            "oscilloscope": [],
+            "energymeter": []
+        }
+        self.oscilloscope_average_spin = None
+        self.oscilloscope_channel_variable = None
 
-    # =====================================================
-    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
-    # =====================================================
 
-    def _safe_widget_config(self, widget, **kwargs):
-        """Безопасное изменение состояния виджета с обработкой ошибок."""
+    def _safe_widget_configuration(self, widget, **kwargs):
         try:
             if widget and widget.winfo_exists():
                 widget.config(**kwargs)
-        except Exception:
+        except:
             pass
 
-    def _safe_label_config(self, label, text=None, foreground=None):
-        """Безопасное обновление текста метки."""
+
+    def _safe_label_configuration(self, label, text=None, foreground=None):
         try:
             if label and label.winfo_exists():
                 if text is not None:
                     label.config(text=text)
+
                 if foreground is not None:
                     label.config(foreground=foreground)
-        except Exception:
+        except:
             pass
 
-    def _safe_command(self, func, *args, **kwargs):
-        """Безопасный вызов функции с подавлением ошибок."""
-        try:
-            return func(*args, **kwargs)
-        except Exception:
-            return None
 
     def _set_buttons_state(self, button_list, state):
-        """Установка состояния группы кнопок."""
-        for btn in button_list:
-            self._safe_widget_config(btn, state=state)
+        for button in button_list:
+            self._safe_widget_configuration(button, state=state)
 
-    # =====================================================
-    # ОБНОВЛЕНИЕ СТАТУСА (многопоточное)
-    # =====================================================
 
     def update_chromator_status(self):
-        """Обновление статуса монохроматора."""
-        if not self.chromator_connected or not self.chromator_device:
-            self._safe_label_config(self.status_labels.get("chromator_wavelength"), text="--- нм")
-            self._safe_label_config(self.status_labels.get("chromator_input_slit"), text="--- мкм")
-            self._safe_label_config(self.status_labels.get("chromator_output_slit"), text="--- мкм")
-            self._safe_label_config(self.status_labels.get("chromator_shutter"), text="---", foreground="black")
-            self._safe_label_config(self.status_labels.get("chromator_grating"), text="-")
-            self._safe_label_config(self.status_labels.get("chromator_grating_count"), text="0")
-            return
+        with self.update_lock:
+            if not self.chromator_connected or not self.chromator_device:
+                self._safe_label_configuration(self.status_labels.get("chromator_wavelength"), text="--- нм")
+                self._safe_label_configuration(self.status_labels.get("chromator_input_slit"), text="--- мкм")
+                self._safe_label_configuration(self.status_labels.get("chromator_output_slit"), text="--- мкм")
+                self._safe_label_configuration(self.status_labels.get("chromator_shutter"), text="---", foreground="black")
+                self._safe_label_configuration(self.status_labels.get("chromator_grating"), text="-")
+                self._safe_label_configuration(self.status_labels.get("chromator_grating_count"), text="0")
 
-        try:
-            # Длина волны
-            wl = self.chromator_device.get_wavelength()
-            self._safe_label_config(self.status_labels.get("chromator_wavelength"), text=f"{wl:.2f} нм")
+                return
 
-            # Щели
-            slit_count = self.chromator_device.get_slit_count()
-            if slit_count > 0:
-                input_w = self.chromator_device.get_slit_width(0)
-                self._safe_label_config(self.status_labels.get("chromator_input_slit"), text=f"{input_w:.2f} мкм")
-            if slit_count > 1:
-                output_w = self.chromator_device.get_slit_width(1)
-                self._safe_label_config(self.status_labels.get("chromator_output_slit"), text=f"{output_w:.2f} мкм")
+            try:
+                wavelength = self.chromator_device.get_wavelength()
+                self._safe_label_configuration(self.status_labels.get("chromator_wavelength"), text=f"{wavelength:.2f} нм")
 
-            # Затвор
-            shutter = self.chromator_device.get_shutter_state(0)
-            if shutter == 1:
-                self._safe_label_config(self.status_labels.get("chromator_shutter"), text="Открыт", foreground="green")
-            else:
-                self._safe_label_config(self.status_labels.get("chromator_shutter"), text="Закрыт", foreground="red")
+                slit_count = self.chromator_device.get_slit_count()
 
-            # Решётки
-            grating = self.chromator_device.get_active_grating()
-            self._safe_label_config(self.status_labels.get("chromator_grating"), text=str(grating))
-            grating_count = self.chromator_device.get_grating_count()
-            self._safe_label_config(self.status_labels.get("chromator_grating_count"), text=str(grating_count))
-        except Exception:
-            pass
+                if slit_count > 0:
+                    input_width = self.chromator_device.get_slit_width(0)
+                    self._safe_label_configuration(self.status_labels.get("chromator_input_slit"), text=f"{input_width:.2f} мкм")
+
+                if slit_count > 1:
+                    output_width = self.chromator_device.get_slit_width(1)
+                    self._safe_label_configuration(self.status_labels.get("chromator_output_slit"), text=f"{output_width:.2f} мкм")
+
+                shutter_state = self.chromator_device.get_shutter_state(0)
+
+                if shutter_state == 1:
+                    self._safe_label_configuration(self.status_labels.get("chromator_shutter"), text="Открыт", foreground="green")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("chromator_shutter"), text="Закрыт", foreground="red")
+
+                active_grating = self.chromator_device.get_active_grating()
+                self._safe_label_configuration(self.status_labels.get("chromator_grating"), text=str(active_grating))
+                grating_count = self.chromator_device.get_grating_count()
+                self._safe_label_configuration(self.status_labels.get("chromator_grating_count"), text=str(grating_count))
+            except:
+                pass
+
 
     def update_laser_status(self):
-        """Обновление статуса лазера."""
-        if not self.laser_connected or not self.laser_source_device:
-            self._safe_label_config(self.status_labels.get("laser_wavelength"), text="--- нм")
-            self._safe_label_config(self.status_labels.get("laser_position"), text="---")
-            self._safe_label_config(self.status_labels.get("laser_speed"), text="---")
-            self._safe_label_config(self.status_labels.get("laser_motor"), text="---", foreground="black")
-            self._safe_label_config(self.status_labels.get("laser_shutter"), text="---", foreground="black")
-            return
+        with self.update_lock:
+            if not self.laser_connected or not self.laser_source_device:
+                self._safe_label_configuration(self.status_labels.get("laser_wavelength"), text="--- нм")
+                self._safe_label_configuration(self.status_labels.get("laser_position"), text="---")
+                self._safe_label_configuration(self.status_labels.get("laser_speed"), text="---")
+                self._safe_label_configuration(self.status_labels.get("laser_motor"), text="---", foreground="black")
+                self._safe_label_configuration(self.status_labels.get("laser_shutter"), text="---", foreground="black")
 
-        try:
-            wl = self.laser_source_device.get_wavelength()
-            self._safe_label_config(self.status_labels.get("laser_wavelength"), text=f"{wl:.2f} нм")
+                return
 
-            pos = self.laser_source_device.get_position(1)
-            self._safe_label_config(self.status_labels.get("laser_position"), text=str(pos))
+            try:
+                wavelength = self.laser_source_device.get_wavelength()
+                self._safe_label_configuration(self.status_labels.get("laser_wavelength"), text=f"{wavelength:.2f} нм")
 
-            speed = self.laser_source_device.get_speed(1)
-            self._safe_label_config(self.status_labels.get("laser_speed"), text=str(speed))
+                position = self.laser_source_device.get_position(1)
+                self._safe_label_configuration(self.status_labels.get("laser_position"), text=str(position))
 
-            motor_status = self.laser_source_device.get_status(1)
-            if motor_status == 0:
-                self._safe_label_config(self.status_labels.get("laser_motor"), text="Готов", foreground="green")
-            elif motor_status == 1:
-                self._safe_label_config(self.status_labels.get("laser_motor"), text="Движение", foreground="orange")
-            else:
-                self._safe_label_config(self.status_labels.get("laser_motor"), text="Ошибка", foreground="red")
+                speed = self.laser_source_device.get_speed(1)
+                self._safe_label_configuration(self.status_labels.get("laser_speed"), text=str(speed))
 
-            shutter = self.laser_source_device.get_shutter(1)
-            if shutter:
-                self._safe_label_config(self.status_labels.get("laser_shutter"), text="Открыт", foreground="green")
-            else:
-                self._safe_label_config(self.status_labels.get("laser_shutter"), text="Закрыт", foreground="red")
-        except Exception:
-            pass
+                motor_status = self.laser_source_device.get_status(1)
+
+                if motor_status == 0:
+                    self._safe_label_configuration(self.status_labels.get("laser_motor"), text="Готов", foreground="green")
+                elif motor_status == 1:
+                    self._safe_label_configuration(self.status_labels.get("laser_motor"), text="Движение", foreground="orange")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("laser_motor"), text="Ошибка", foreground="red")
+
+                shutter_state = self.laser_source_device.get_shutter(1)
+
+                if shutter_state:
+                    self._safe_label_configuration(self.status_labels.get("laser_shutter"), text="Открыт", foreground="green")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("laser_shutter"), text="Закрыт", foreground="red")
+            except:
+                pass
+
 
     def update_oscilloscope_status(self):
-        """Обновление статуса осциллографа."""
-        if not self.oscilloscope_connected or not self.oscilloscope_device:
-            self._safe_label_config(self.status_labels.get("oscilloscope_scale"), text="--- В/дел")
-            self._safe_label_config(self.status_labels.get("oscilloscope_offset"), text="--- В")
-            self._safe_label_config(self.status_labels.get("oscilloscope_coupling"), text="---")
-            self._safe_label_config(self.status_labels.get("oscilloscope_enabled"), text="---", foreground="black")
-            self._safe_label_config(self.status_labels.get("oscilloscope_timebase"), text="--- с/дел")
-            self._safe_label_config(self.status_labels.get("oscilloscope_acquisition_type"), text="---")
-            self._safe_label_config(self.status_labels.get("oscilloscope_average"), text="---")
-            return
+        with self.update_lock:
+            if not self.oscilloscope_connected or not self.oscilloscope_device:
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_scale"), text="--- В/дел")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_offset"), text="--- В")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_coupling"), text="---")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_enabled"), text="---", foreground="black")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_timebase"), text="--- с/дел")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_acquisition_type"), text="---")
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_average"), text="---")
 
-        try:
-            channel_str = self.status_labels.get("oscilloscope_channel", tk.StringVar(value="1")).get()
-            channel = int(channel_str)
+                return
 
-            scale = self.oscilloscope_device.get_channel_scale(channel)
-            self._safe_label_config(self.status_labels.get("oscilloscope_scale"), text=f"{scale:.3f} В/дел")
+            try:
+                channel_string = self.oscilloscope_channel_variable.get()
+                channel = int(channel_string)
 
-            offset = self.oscilloscope_device.get_channel_offset(channel)
-            self._safe_label_config(self.status_labels.get("oscilloscope_offset"), text=f"{offset:.3f} В")
+                scale = self.oscilloscope_device.get_channel_scale(channel)
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_scale"), text=f"{scale:.3f} В/дел")
 
-            coupling = self.oscilloscope_device.get_channel_coupling(channel)
-            self._safe_label_config(self.status_labels.get("oscilloscope_coupling"), text=coupling)
+                offset = self.oscilloscope_device.get_channel_offset(channel)
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_offset"), text=f"{offset:.3f} В")
 
-            enabled = self.oscilloscope_device.is_channel_enabled(channel)
-            if enabled:
-                self._safe_label_config(self.status_labels.get("oscilloscope_enabled"), text="Включён", foreground="green")
-            else:
-                self._safe_label_config(self.status_labels.get("oscilloscope_enabled"), text="Отключён", foreground="red")
+                coupling = self.oscilloscope_device.get_channel_coupling(channel)
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_coupling"), text=coupling)
 
-            timebase = self.oscilloscope_device.get_timebase_scale()
-            self._safe_label_config(self.status_labels.get("oscilloscope_timebase"), text=f"{timebase:.2e} с/дел")
+                enabled = self.oscilloscope_device.is_channel_enabled(channel)
 
-            avg = self.oscilloscope_device.get_average_count()
-            self._safe_label_config(self.status_labels.get("oscilloscope_average"), text=str(avg))
+                if enabled:
+                    self._safe_label_configuration(self.status_labels.get("oscilloscope_enabled"), text="Включён", foreground="green")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("oscilloscope_enabled"), text="Отключён", foreground="red")
 
-            acq_type = self.oscilloscope_device.get_acquisition_type()
-            self._safe_label_config(self.status_labels.get("oscilloscope_acquisition_type"), text=acq_type)
-        except Exception:
-            pass
+                timebase = self.oscilloscope_device.get_timebase_scale()
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_timebase"), text=f"{timebase:.2e} с/дел")
 
-    def update_powermeter_status(self):
-        """Обновление статуса энергометра."""
-        if not self.powermeter_connected or not self.powermeter_device:
-            self._safe_label_config(self.status_labels.get("powermeter_power"), text="--- Вт")
-            self._safe_label_config(self.status_labels.get("powermeter_average_power"), text="--- Вт")
-            self._safe_label_config(self.status_labels.get("powermeter_scale"), text="---")
-            self._safe_label_config(self.status_labels.get("powermeter_autoscale"), text="---", foreground="black")
-            self._safe_label_config(self.status_labels.get("powermeter_wavelength"), text="--- нм")
-            return
+                average_count = self.oscilloscope_device.get_average_count()
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_average"), text=str(average_count))
 
-        try:
-            power = self.powermeter_device.get_power()
-            self._safe_label_config(self.status_labels.get("powermeter_power"), text=f"{power:.6e} Вт")
+                acquisition_type = self.oscilloscope_device.get_acquisition_type()
+                self._safe_label_configuration(self.status_labels.get("oscilloscope_acquisition_type"), text=acquisition_type)
+            except:
+                pass
 
-            scale_idx = self.powermeter_device.get_current_scale_index()
-            self._safe_label_config(self.status_labels.get("powermeter_scale"), text=str(scale_idx))
 
-            autoscale = self.powermeter_device.get_autoscale()
-            if autoscale:
-                self._safe_label_config(self.status_labels.get("powermeter_autoscale"), text="Включена", foreground="green")
-            else:
-                self._safe_label_config(self.status_labels.get("powermeter_autoscale"), text="Отключена", foreground="red")
+    def update_energymeter_status(self):
+        with self.update_lock:
+            if not self.energymeter_connected or not self.energymeter_device:
+                self._safe_label_configuration(self.status_labels.get("energymeter_power"), text="--- Вт")
+                self._safe_label_configuration(self.status_labels.get("energymeter_average_power"), text="--- Вт")
+                self._safe_label_configuration(self.status_labels.get("energymeter_scale"), text="---")
+                self._safe_label_configuration(self.status_labels.get("energymeter_autoscale"), text="---", foreground="black")
+                self._safe_label_configuration(self.status_labels.get("energymeter_wavelength"), text="--- нм")
 
-            wl = self.powermeter_device.get_wavelength()
-            if wl > 0:
-                self._safe_label_config(self.status_labels.get("powermeter_wavelength"), text=f"{wl} нм")
-            else:
-                self._safe_label_config(self.status_labels.get("powermeter_wavelength"), text="--- нм")
-        except Exception:
-            pass
+                return
+
+            try:
+                power = self.energymeter_device.get_power()
+                self._safe_label_configuration(self.status_labels.get("energymeter_power"), text=f"{power:.6e} Вт")
+
+                scale_index = self.energymeter_device.get_current_scale_index()
+                self._safe_label_configuration(self.status_labels.get("energymeter_scale"), text=str(scale_index))
+
+                autoscale_enabled = self.energymeter_device.get_autoscale()
+
+                if autoscale_enabled:
+                    self._safe_label_configuration(self.status_labels.get("energymeter_autoscale"), text="Включена", foreground="green")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("energymeter_autoscale"), text="Отключена", foreground="red")
+
+                wavelength = self.energymeter_device.get_wavelength()
+
+                if wavelength > 0:
+                    self._safe_label_configuration(self.status_labels.get("energymeter_wavelength"), text=f"{wavelength} нм")
+                else:
+                    self._safe_label_configuration(self.status_labels.get("energymeter_wavelength"), text="--- нм")
+            except:
+                pass
+
 
     def update_all_status(self):
-        """Обновление статуса всех устройств (запускается в потоке)."""
         if not self.auto_update_enabled:
             return
 
         self.update_chromator_status()
         self.update_laser_status()
         self.update_oscilloscope_status()
-        self.update_powermeter_status()
+        self.update_energymeter_status()
 
-        # Запуск следующего обновления через 1.5 секунды
         if self.auto_update_enabled:
             if self.status_timer:
                 try:
                     self.status_timer.cancel()
-                except Exception:
+                except:
                     pass
+
             self.status_timer = threading.Timer(1.5, self.update_all_status)
             self.status_timer.daemon = True
             self.status_timer.start()
 
+
     def start_auto_update(self):
-        """Запуск автоматического обновления статуса."""
-        if self.auto_update_enabled:
-            self.auto_update_enabled = True
-            self.update_all_status()
+        self.auto_update_enabled = True
+        self.update_all_status()
+
 
     def stop_auto_update(self):
-        """Остановка автоматического обновления статуса."""
         self.auto_update_enabled = False
+
         if self.status_timer:
             try:
                 self.status_timer.cancel()
-            except Exception:
+            except:
                 pass
+
             self.status_timer = None
 
-    # =====================================================
-    # ПОДКЛЮЧЕНИЕ / ОТКЛЮЧЕНИЕ УСТРОЙСТВ
-    # =====================================================
+
+    def disconnect_all_devices(self):
+        try:
+            if self.chromator_connected and self.chromator_device:
+                self.chromator_device.disconnect()
+                self.chromator_connected = False
+                self.chromator_device = None
+        except:
+            self.chromator_connected = False
+            self.chromator_device = None
+
+        try:
+            if self.laser_connected and self.laser_source_device:
+                self.laser_source_device.disconnect()
+                self.laser_connected = False
+                self.laser_source_device = None
+        except:
+            self.laser_connected = False
+            self.laser_source_device = None
+
+        try:
+            if self.oscilloscope_connected and self.oscilloscope_device:
+                try:
+                    self.oscilloscope_device.stop_acquisition()
+                    time.sleep(0.3)
+                except:
+                    pass
+
+                self.oscilloscope_device.disconnect()
+                self.oscilloscope_connected = False
+                self.oscilloscope_device = None
+        except:
+            self.oscilloscope_connected = False
+            self.oscilloscope_device = None
+
+        try:
+            if self.energymeter_connected and self.energymeter_device:
+                self.energymeter_device.disconnect()
+                self.energymeter_connected = False
+                self.energymeter_device = None
+        except:
+            self.energymeter_connected = False
+            self.energymeter_device = None
+
 
     def connect_chromator(self):
-        """Подключение монохроматора."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["chromator_connect"], state=tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["chromator_connect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
 
                     self.chromator_device = Chromator()
+
                     if self.chromator_device.connect():
                         self.chromator_connected = True
                         self._set_buttons_state(self.control_buttons["chromator"], tk.NORMAL)
-                        self._safe_widget_config(self.control_buttons["chromator_connect"], state=tk.DISABLED)
-                        self._safe_widget_config(self.control_buttons["chromator_disconnect"], state=tk.NORMAL)
-                        self._safe_label_config(self.status_labels.get("chromator_status"), text="Подключен", foreground="green")
+                        self._safe_widget_configuration(self.control_buttons["chromator_connect"], state=tk.DISABLED)
+                        self._safe_widget_configuration(self.control_buttons["chromator_disconnect"], state=tk.NORMAL)
+                        self._safe_label_configuration(self.status_labels.get("chromator_status"), text="Подключен", foreground="green")
                     else:
                         self.chromator_device = None
                         self.chromator_connected = False
-                        self._safe_label_config(self.status_labels.get("chromator_status"), text="Ошибка", foreground="red")
-                        messagebox.showerror("Ошибка", "Не удалось подключить монохроматор")
-                except Exception:
+                        self._safe_label_configuration(self.status_labels.get("chromator_status"), text="Ошибка", foreground="red")
+
+                        def show_error():
+                            messagebox.showerror("Ошибка", "Не удалось подключить монохроматор!")
+
+                        self.root_window.after(0, show_error)
+                except:
                     self.chromator_connected = False
-                    self._safe_label_config(self.status_labels.get("chromator_status"), text="Ошибка", foreground="red")
+                    self._safe_label_configuration(self.status_labels.get("chromator_status"), text="Ошибка", foreground="red")
                 finally:
-                    self._safe_widget_config(self.control_buttons["chromator_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["chromator_connect"], state=tk.NORMAL)
                     self.update_chromator_status()
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def disconnect_chromator(self):
-        """Отключение монохроматора."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
+
                     if self.chromator_device:
                         self.chromator_device.disconnect()
                         self.chromator_device = None
+
                     self.chromator_connected = False
                     self._set_buttons_state(self.control_buttons["chromator"], tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["chromator_connect"], state=tk.NORMAL)
-                    self._safe_widget_config(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
-                    self._safe_label_config(self.status_labels.get("chromator_status"), text="Отключен", foreground="black")
-                except Exception:
+                    self._safe_widget_configuration(self.control_buttons["chromator_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["chromator_disconnect"], state=tk.DISABLED)
+                    self._safe_label_configuration(self.status_labels.get("chromator_status"), text="Отключен", foreground="black")
+                except:
                     pass
                 finally:
                     self.update_chromator_status()
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def connect_laser(self):
-        """Подключение лазера."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["laser_connect"], state=tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["laser_connect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
 
                     self.laser_source_device = LaserSource()
+
                     if self.laser_source_device.connect():
                         self.laser_connected = True
                         self._set_buttons_state(self.control_buttons["laser"], tk.NORMAL)
-                        self._safe_widget_config(self.control_buttons["laser_connect"], state=tk.DISABLED)
-                        self._safe_widget_config(self.control_buttons["laser_disconnect"], state=tk.NORMAL)
-                        self._safe_label_config(self.status_labels.get("laser_status"), text="Подключен", foreground="green")
+                        self._safe_widget_configuration(self.control_buttons["laser_connect"], state=tk.DISABLED)
+                        self._safe_widget_configuration(self.control_buttons["laser_disconnect"], state=tk.NORMAL)
+                        self._safe_label_configuration(self.status_labels.get("laser_status"), text="Подключен", foreground="green")
                     else:
                         self.laser_source_device = None
                         self.laser_connected = False
-                        self._safe_label_config(self.status_labels.get("laser_status"), text="Ошибка", foreground="red")
-                        messagebox.showerror("Ошибка", "Не удалось подключить лазер")
-                except Exception:
+                        self._safe_label_configuration(self.status_labels.get("laser_status"), text="Ошибка", foreground="red")
+
+                        def show_error():
+                            messagebox.showerror("Ошибка", "Не удалось подключить лазер!")
+
+                        self.root_window.after(0, show_error)
+                except:
                     self.laser_connected = False
-                    self._safe_label_config(self.status_labels.get("laser_status"), text="Ошибка", foreground="red")
+                    self._safe_label_configuration(self.status_labels.get("laser_status"), text="Ошибка", foreground="red")
                 finally:
-                    self._safe_widget_config(self.control_buttons["laser_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["laser_connect"], state=tk.NORMAL)
                     self.update_laser_status()
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def disconnect_laser(self):
-        """Отключение лазера."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
+
                     if self.laser_source_device:
                         self.laser_source_device.disconnect()
                         self.laser_source_device = None
+
                     self.laser_connected = False
                     self._set_buttons_state(self.control_buttons["laser"], tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["laser_connect"], state=tk.NORMAL)
-                    self._safe_widget_config(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
-                    self._safe_label_config(self.status_labels.get("laser_status"), text="Отключен", foreground="black")
-                except Exception:
+                    self._safe_widget_configuration(self.control_buttons["laser_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["laser_disconnect"], state=tk.DISABLED)
+                    self._safe_label_configuration(self.status_labels.get("laser_status"), text="Отключен", foreground="black")
+                except:
                     pass
                 finally:
                     self.update_laser_status()
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def connect_oscilloscope(self):
-        """Подключение осциллографа."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["oscilloscope_connect"], state=tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_connect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
 
                     self.oscilloscope_device = Oscilloscope()
-                    if self.oscilloscope_device.connect():
+
+                    if self.oscilloscope_device.connect(timeout_milliseconds=30000):
                         self.oscilloscope_connected = True
                         self._set_buttons_state(self.control_buttons["oscilloscope"], tk.NORMAL)
-                        self._safe_widget_config(self.control_buttons["oscilloscope_connect"], state=tk.DISABLED)
-                        self._safe_widget_config(self.control_buttons["oscilloscope_disconnect"], state=tk.NORMAL)
-                        self._safe_label_config(self.status_labels.get("oscilloscope_status"), text="Подключен", foreground="green")
+                        self._safe_widget_configuration(self.control_buttons["oscilloscope_connect"], state=tk.DISABLED)
+                        self._safe_widget_configuration(self.control_buttons["oscilloscope_disconnect"], state=tk.NORMAL)
+                        self._safe_label_configuration(self.status_labels.get("oscilloscope_status"), text="Подключен", foreground="green")
                     else:
                         self.oscilloscope_device = None
                         self.oscilloscope_connected = False
-                        self._safe_label_config(self.status_labels.get("oscilloscope_status"), text="Ошибка", foreground="red")
-                        messagebox.showerror("Ошибка", "Не удалось подключить осциллограф")
-                except Exception:
+                        self._safe_label_configuration(self.status_labels.get("oscilloscope_status"), text="Ошибка", foreground="red")
+
+                        def show_error():
+                            messagebox.showerror("Ошибка подключения", "Не удалось подключить осциллограф!")
+
+                        self.root_window.after(0, show_error)
+                except ImportError:
                     self.oscilloscope_connected = False
-                    self._safe_label_config(self.status_labels.get("oscilloscope_status"), text="Ошибка", foreground="red")
+                    self._safe_label_configuration(self.status_labels.get("oscilloscope_status"), text="Ошибка", foreground="red")
+
+                    def show_import_error():
+                        messagebox.showerror("Ошибка", "Установите библиотеку PyVISA!")
+
+                    self.root_window.after(0, show_import_error)
+                except:
+                    self.oscilloscope_connected = False
+                    self._safe_label_configuration(self.status_labels.get("oscilloscope_status"), text="Ошибка", foreground="red")
                 finally:
-                    self._safe_widget_config(self.control_buttons["oscilloscope_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_connect"], state=tk.NORMAL)
                     self.update_oscilloscope_status()
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def disconnect_oscilloscope(self):
-        """Отключение осциллографа."""
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
+
                     if self.oscilloscope_device:
+                        try:
+                            self.oscilloscope_device.stop_acquisition()
+                            time.sleep(0.3)
+                        except:
+                            pass
+
                         self.oscilloscope_device.disconnect()
                         self.oscilloscope_device = None
                     self.oscilloscope_connected = False
                     self._set_buttons_state(self.control_buttons["oscilloscope"], tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["oscilloscope_connect"], state=tk.NORMAL)
-                    self._safe_widget_config(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
-                    self._safe_label_config(self.status_labels.get("oscilloscope_status"), text="Отключен", foreground="black")
-                except Exception:
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["oscilloscope_disconnect"], state=tk.DISABLED)
+                    self._safe_label_configuration(self.status_labels.get("oscilloscope_status"), text="Отключен", foreground="black")
+                except:
                     pass
                 finally:
                     self.update_oscilloscope_status()
+
         threading.Thread(target=task, daemon=True).start()
 
-    def connect_powermeter(self):
-        """Подключение энергометра."""
+
+    def connect_energymeter(self):
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["powermeter_connect"], state=tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["powermeter_disconnect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["energymeter_connect"], state=tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["energymeter_disconnect"], state=tk.DISABLED)
 
-                    self.powermeter_device = Powermeter()
-                    if self.powermeter_device.connect():
-                        self.powermeter_connected = True
-                        self._set_buttons_state(self.control_buttons["powermeter"], tk.NORMAL)
-                        self._safe_widget_config(self.control_buttons["powermeter_connect"], state=tk.DISABLED)
-                        self._safe_widget_config(self.control_buttons["powermeter_disconnect"], state=tk.NORMAL)
-                        self._safe_label_config(self.status_labels.get("powermeter_status"), text="Подключен", foreground="green")
+                    self.energymeter_device = Energymeter()
+
+                    if self.energymeter_device.connect():
+                        self.energymeter_connected = True
+                        self._set_buttons_state(self.control_buttons["energymeter"], tk.NORMAL)
+                        self._safe_widget_configuration(self.control_buttons["energymeter_connect"], state=tk.DISABLED)
+                        self._safe_widget_configuration(self.control_buttons["energymeter_disconnect"], state=tk.NORMAL)
+                        self._safe_label_configuration(self.status_labels.get("energymeter_status"), text="Подключен", foreground="green")
                     else:
-                        self.powermeter_device = None
-                        self.powermeter_connected = False
-                        self._safe_label_config(self.status_labels.get("powermeter_status"), text="Ошибка", foreground="red")
-                        messagebox.showerror("Ошибка", "Не удалось подключить энергометр")
-                except Exception:
-                    self.powermeter_connected = False
-                    self._safe_label_config(self.status_labels.get("powermeter_status"), text="Ошибка", foreground="red")
+                        self.energymeter_device = None
+                        self.energymeter_connected = False
+                        self._safe_label_configuration(self.status_labels.get("energymeter_status"), text="Ошибка", foreground="red")
+
+                        def show_error():
+                            messagebox.showerror("Ошибка", "Не удалось подключить энергометр!")
+
+                        self.root_window.after(0, show_error)
+                except:
+                    self.energymeter_connected = False
+                    self._safe_label_configuration(self.status_labels.get("energymeter_status"), text="Ошибка", foreground="red")
                 finally:
-                    self._safe_widget_config(self.control_buttons["powermeter_connect"], state=tk.NORMAL)
-                    self.update_powermeter_status()
+                    self._safe_widget_configuration(self.control_buttons["energymeter_connect"], state=tk.NORMAL)
+                    self.update_energymeter_status()
+
         threading.Thread(target=task, daemon=True).start()
 
-    def disconnect_powermeter(self):
-        """Отключение энергометра."""
+
+    def disconnect_energymeter(self):
         def task():
             with self.operation_lock:
                 try:
-                    self._safe_widget_config(self.control_buttons["powermeter_disconnect"], state=tk.DISABLED)
-                    if self.powermeter_device:
-                        self.powermeter_device.disconnect()
-                        self.powermeter_device = None
-                    self.powermeter_connected = False
-                    self._set_buttons_state(self.control_buttons["powermeter"], tk.DISABLED)
-                    self._safe_widget_config(self.control_buttons["powermeter_connect"], state=tk.NORMAL)
-                    self._safe_widget_config(self.control_buttons["powermeter_disconnect"], state=tk.DISABLED)
-                    self._safe_label_config(self.status_labels.get("powermeter_status"), text="Отключен", foreground="black")
-                except Exception:
+                    self._safe_widget_configuration(self.control_buttons["energymeter_disconnect"], state=tk.DISABLED)
+
+                    if self.energymeter_device:
+                        self.energymeter_device.disconnect()
+                        self.energymeter_device = None
+
+                    self.energymeter_connected = False
+                    self._set_buttons_state(self.control_buttons["energymeter"], tk.DISABLED)
+                    self._safe_widget_configuration(self.control_buttons["energymeter_connect"], state=tk.NORMAL)
+                    self._safe_widget_configuration(self.control_buttons["energymeter_disconnect"], state=tk.DISABLED)
+                    self._safe_label_configuration(self.status_labels.get("energymeter_status"), text="Отключен", foreground="black")
+                except:
                     pass
                 finally:
-                    self.update_powermeter_status()
+                    self.update_energymeter_status()
+
         threading.Thread(target=task, daemon=True).start()
 
-    # =====================================================
-    # УПРАВЛЕНИЕ МОНОХРОМАТОРОМ
-    # =====================================================
 
     def set_chromator_wavelength(self, entry):
         if not self.chromator_connected:
             return
+
         def task():
             try:
-                wl = float(entry.get())
-                self.chromator_device.set_wavelength(wl)
+                wavelength = float(entry.get())
+                self.chromator_device.set_wavelength(wavelength)
                 time.sleep(0.3)
                 self.update_chromator_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_chromator_input_slit(self, entry):
         if not self.chromator_connected:
             return
+
         def task():
             try:
                 width = float(entry.get())
                 self.chromator_device.set_slit_width(0, width)
                 self.update_chromator_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_chromator_output_slit(self, entry):
         if not self.chromator_connected:
             return
+
         def task():
             try:
                 width = float(entry.get())
+
                 if self.chromator_device.get_slit_count() > 1:
                     self.chromator_device.set_slit_width(1, width)
                     self.update_chromator_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def open_chromator_shutter(self):
         if self.chromator_connected:
-            self.chromator_device.shutter_open(0)
-            self.update_chromator_status()
+            try:
+                self.chromator_device.shutter_open(0)
+                self.update_chromator_status()
+            except:
+                pass
+
 
     def close_chromator_shutter(self):
         if self.chromator_connected:
-            self.chromator_device.shutter_close(0)
-            self.update_chromator_status()
+            try:
+                self.chromator_device.shutter_close(0)
+                self.update_chromator_status()
+            except:
+                pass
+
 
     def set_chromator_grating(self, spinbox):
         if self.chromator_connected:
@@ -560,434 +679,705 @@ class DeviceManager:
                 grating_index = int(spinbox.get())
                 self.chromator_device.set_active_grating(grating_index)
                 self.update_chromator_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректный номер решётки")
-            except Exception:
+            except:
                 pass
 
+
     def set_chromator_filter(self, combobox):
-        """Установка фильтра монохроматора."""
         if self.chromator_connected:
             try:
                 filter_index = int(combobox.get().split()[0])
                 self.chromator_device.set_filter_state(filter_index, 0)
                 self.update_chromator_status()
-            except Exception:
+            except:
                 pass
 
+
     def set_chromator_mirror(self, combobox):
-        """Переключение выходного порта монохроматора."""
         if self.chromator_connected:
             try:
                 mirror_index = 0
                 state = 0 if combobox.get() == "Осевой" else 1
                 self.chromator_device.set_mirror_state(mirror_index, state)
                 self.update_chromator_status()
-            except Exception:
+            except:
                 pass
 
-    def reset_chromator_grating(self):
-        """Сброс решётки монохроматора."""
-        if self.chromator_connected:
-            self.chromator_device.reset_grating()
-            self.update_chromator_status()
 
-    # =====================================================
-    # УПРАВЛЕНИЕ ЛАЗЕРОМ
-    # =====================================================
+    def reset_chromator_grating(self):
+        if self.chromator_connected:
+            try:
+                self.chromator_device.reset_grating()
+                self.update_chromator_status()
+            except:
+                pass
+
 
     def set_laser_wavelength(self, entry):
         if not self.laser_connected:
             return
+
         def task():
             try:
-                wl = float(entry.get())
-                self.laser_source_device.set_wavelength(wl)
+                wavelength = float(entry.get())
+                self.laser_source_device.set_wavelength(wavelength)
                 time.sleep(0.3)
                 self.update_laser_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_laser_absolute_position(self, entry):
         if not self.laser_connected:
             return
+
         def task():
             try:
-                pos = int(entry.get())
-                self.laser_source_device.set_absolute_position(1, pos)
+                position = int(entry.get())
+                self.laser_source_device.set_absolute_position(1, position)
                 time.sleep(0.3)
                 self.update_laser_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное целое число")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_laser_relative_position(self, entry):
         if not self.laser_connected:
             return
+
         def task():
             try:
                 steps = int(entry.get())
                 self.laser_source_device.set_relative_position(1, steps)
                 time.sleep(0.3)
                 self.update_laser_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное целое число")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_laser_speed(self, entry):
         if not self.laser_connected:
             return
+
         def task():
             try:
                 speed = int(entry.get())
                 self.laser_source_device.set_speed(1, speed)
                 self.update_laser_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное целое число")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def enable_laser_motor(self):
         if self.laser_connected:
-            self.laser_source_device.enable_motor(1)
-            self.update_laser_status()
+            try:
+                self.laser_source_device.enable_motor(1)
+                self.update_laser_status()
+            except:
+                pass
+
 
     def disable_laser_motor(self):
         if self.laser_connected:
-            self.laser_source_device.disable_motor(1)
-            self.update_laser_status()
+            try:
+                self.laser_source_device.disable_motor(1)
+                self.update_laser_status()
+            except:
+                pass
+
 
     def open_laser_shutter(self):
         if self.laser_connected:
-            self.laser_source_device.set_shutter(1, True)
-            self.update_laser_status()
+            try:
+                self.laser_source_device.set_shutter(1, True)
+                self.update_laser_status()
+            except:
+                pass
+
 
     def close_laser_shutter(self):
         if self.laser_connected:
-            self.laser_source_device.set_shutter(1, False)
-            self.update_laser_status()
+            try:
+                self.laser_source_device.set_shutter(1, False)
+                self.update_laser_status()
+            except:
+                pass
+
 
     def reset_laser(self):
-        """Сброс лазера (RESET)."""
         if self.laser_connected:
-            self.laser_source_device.reset()
-            self.update_laser_status()
+            try:
+                self.laser_source_device.reset()
+                self.update_laser_status()
+            except:
+                pass
 
-    # =====================================================
-    # УПРАВЛЕНИЕ ОСЦИЛЛОГРАФОМ
-    # =====================================================
 
     def set_oscilloscope_scale(self, entry):
         if not self.oscilloscope_connected:
             return
+
         def task():
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
+                channel = int(self.oscilloscope_channel_variable.get())
                 scale = float(entry.get())
                 self.oscilloscope_device.set_channel_scale(channel, scale)
                 self.update_oscilloscope_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_oscilloscope_offset(self, entry):
         if not self.oscilloscope_connected:
             return
+
         def task():
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
+                channel = int(self.oscilloscope_channel_variable.get())
                 offset = float(entry.get())
                 self.oscilloscope_device.set_channel_offset(channel, offset)
                 self.update_oscilloscope_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
+
 
     def set_oscilloscope_coupling(self, combobox):
         if self.oscilloscope_connected:
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
+                channel = int(self.oscilloscope_channel_variable.get())
                 coupling = combobox.get()
                 self.oscilloscope_device.set_channel_coupling(channel, coupling)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
+
 
     def enable_oscilloscope_channel(self):
         if self.oscilloscope_connected:
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
+                channel = int(self.oscilloscope_channel_variable.get())
                 self.oscilloscope_device.set_channel_enabled(channel, True)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
+
 
     def disable_oscilloscope_channel(self):
         if self.oscilloscope_connected:
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
+                channel = int(self.oscilloscope_channel_variable.get())
                 self.oscilloscope_device.set_channel_enabled(channel, False)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
+
 
     def set_oscilloscope_timebase(self, entry):
         if not self.oscilloscope_connected:
             return
+
         def task():
             try:
                 timebase = float(entry.get())
                 self.oscilloscope_device.set_timebase_scale(timebase)
                 self.update_oscilloscope_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    def set_oscilloscope_average(self, entry):
+
+    def set_oscilloscope_average_count(self, entry):
         if not self.oscilloscope_connected:
             return
+
         def task():
             try:
-                avg = int(entry.get())
-                self.oscilloscope_device.set_average_count(avg)
+                average_count = int(entry.get())
+                self.oscilloscope_device.set_average_count(average_count)
                 self.update_oscilloscope_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное целое число")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def set_oscilloscope_trigger_source(self, combobox):
-        """Установка источника триггера."""
         if self.oscilloscope_connected:
             try:
                 source = combobox.get()
                 self.oscilloscope_device.set_trigger_source(source)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
 
+
     def set_oscilloscope_trigger_level(self, entry):
-        """Установка уровня триггера."""
         if not self.oscilloscope_connected:
             return
+
         def task():
             try:
                 level = float(entry.get())
                 self.oscilloscope_device.set_trigger_level(level)
                 self.update_oscilloscope_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное числовое значение")
-            except Exception:
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
+
     def set_oscilloscope_trigger_slope(self, combobox):
-        """Установка наклона триггера."""
         if self.oscilloscope_connected:
             try:
                 slope = combobox.get()
                 self.oscilloscope_device.set_trigger_slope(slope)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
 
+
     def set_oscilloscope_impedance(self, combobox):
-        """Установка импеданса канала (50 Ом / 1 МОм)."""
         if self.oscilloscope_connected:
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
-                imp = float(combobox.get().split()[0]) * 1e6 if "М" in combobox.get() else 50.0
-                self.oscilloscope_device.set_channel_impedance(channel, imp)
+                channel = int(self.oscilloscope_channel_variable.get())
+                impedance_string = combobox.get()
+
+                if "М" in impedance_string:
+                    impedance = float(impedance_string.split()[0]) * 1e6
+                else:
+                    impedance = 50.0
+
+                self.oscilloscope_device.set_channel_impedance(channel, impedance)
                 self.update_oscilloscope_status()
-            except Exception:
+            except:
                 pass
+
 
     def run_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
-            self.oscilloscope_device.run_acquisition()
+            try:
+                self.oscilloscope_device.run_acquisition()
+            except:
+                pass
+
 
     def stop_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
-            self.oscilloscope_device.stop_acquisition()
+            try:
+                self.oscilloscope_device.stop_acquisition()
+            except:
+                pass
+
 
     def single_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
-            self.oscilloscope_device.single_acquisition()
+            try:
+                self.oscilloscope_device.single_acquisition()
+            except:
+                pass
+
 
     def force_oscilloscope_trigger(self):
         if self.oscilloscope_connected:
-            self.oscilloscope_device.force_trigger()
+            try:
+                self.oscilloscope_device.force_trigger()
+            except:
+                pass
 
-    def save_oscilloscope_screenshot(self):
-        if not self.oscilloscope_connected:
-            return
+
+    def capture_oscilloscope_waveform(self, averaged=False, average_count=64):
+        if not self.oscilloscope_connected or not self.oscilloscope_device:
+            return None, None
+
+        try:
+            channel = int(self.oscilloscope_channel_variable.get())
+
+            try:
+                self.oscilloscope_device.stop_acquisition()
+                time.sleep(0.3)
+            except:
+                pass
+
+            try:
+                self.oscilloscope_device.set_channel_enabled(channel, True)
+                self.oscilloscope_device.set_channel_scale(channel, 1.0)
+                self.oscilloscope_device.set_channel_offset(channel, 0.0)
+                self.oscilloscope_device.set_channel_coupling(channel, "DC")
+                self.oscilloscope_device.set_timebase_scale(0.001)
+                time.sleep(0.3)
+            except:
+                pass
+
+            try:
+                self.oscilloscope_device.run_acquisition()
+                time.sleep(0.5)
+                self.oscilloscope_device.stop_acquisition()
+                time.sleep(0.3)
+            except:
+                pass
+
+            time_values = []
+            voltage_values = []
+
+            for attempt in range(3):
+                try:
+                    if averaged:
+                        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform_retry(channel, average_count, 2000, max_retries=2)
+                    else:
+                        time_values, voltage_values = self.oscilloscope_device.capture_waveform(channel, 2000)
+
+                    if time_values and voltage_values:
+                        break
+                except:
+                    time.sleep(0.5)
+
+                    continue
+
+            return time_values, voltage_values
+        except:
+            return None, None
+
+
+    def save_waveform_to_csv(self, time_values, voltage_values, filename=None):
+        if not time_values or not voltage_values:
+            return None
+
+        try:
+            if filename is None:
+                timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+                filename = f"waveform_{timestamp}.csv"
+
+            dialog_completed = threading.Event()
+            file_path_container = [None]
+
+            def show_dialog():
+                file_path_container[0] = filedialog.asksaveasfilename(
+                    defaultextension=".csv",
+                    filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                    initialfile=filename
+                )
+                dialog_completed.set()
+
+            self.root_window.after(0, show_dialog)
+            dialog_completed.wait()
+
+            file_path = file_path_container[0]
+
+            if not file_path:
+                return None
+
+            with open(file_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write("time_seconds,voltage_volts\n")
+
+                for time_value, voltage_value in zip(time_values, voltage_values):
+                    file_handle.write(f"{time_value:.8e},{voltage_value:.6f}\n")
+
+            return file_path
+        except:
+            return None
+
+
+    def save_waveform_to_png(self, time_values, voltage_values, filename=None):
+        if not time_values or not voltage_values:
+            return None
+
+        try:
+            if filename is None:
+                timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+                filename = f"waveform_{timestamp}.png"
+
+            dialog_completed = threading.Event()
+            file_path_container = [None]
+
+            def show_dialog():
+                file_path_container[0] = filedialog.asksaveasfilename(
+                    defaultextension=".png",
+                    filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+                    initialfile=filename
+                )
+                dialog_completed.set()
+
+            self.root_window.after(0, show_dialog)
+            dialog_completed.wait()
+
+            file_path = file_path_container[0]
+
+            if not file_path:
+                return None
+
+            plt.figure(figsize=(12, 6))
+            plt.plot(time_values, voltage_values, "b-", linewidth=1)
+            plt.grid(True, alpha=0.3)
+            plt.xlabel("Время, с")
+            plt.ylabel("Напряжение, В")
+            plt.title(f"Сигнал с осциллографа (канал {self.oscilloscope_channel_variable.get()})")
+            plt.tight_layout()
+            plt.savefig(file_path, dpi=300, bbox_inches="tight")
+            plt.close()
+
+            return file_path
+        except:
+            return None
+
+
+    def capture_and_save_waveform(self, averaged=False, average_count=64, format_type="both"):
         def task():
             try:
-                fname = f"screenshot_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.png"
-                path = os.path.join(os.getcwd(), fname)
-                self.oscilloscope_device.save_screenshot(path)
-                messagebox.showinfo("Успех", f"Скриншот сохранён: {fname}")
-            except Exception:
+                time_values, voltage_values = self.capture_oscilloscope_waveform(averaged, average_count)
+
+                if time_values is None or voltage_values is None:
+                    def show_error():
+                        messagebox.showwarning("Предупреждение", "Не удалось захватить сигнал!")
+
+                    self.root_window.after(0, show_error)
+
+                    return
+
+                saved_files = []
+
+                if format_type in ["csv", "both"]:
+                    prefix = "averaged" if averaged else "waveform"
+                    filename = f"{prefix}_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.csv"
+                    csv_path = self.save_waveform_to_csv(time_values, voltage_values, filename)
+
+                    if csv_path:
+                        saved_files.append(f"CSV: {os.path.basename(csv_path)}")
+
+                if format_type in ["png", "both"]:
+                    prefix = "averaged" if averaged else "waveform"
+                    filename = f"{prefix}_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.png"
+                    png_path = self.save_waveform_to_png(time_values, voltage_values, filename)
+
+                    if png_path:
+                        saved_files.append(f"PNG: {os.path.basename(png_path)}")
+
+                def show_result():
+                    if saved_files:
+                        messagebox.showinfo("Успех", f"Файлы сохранены!")
+                    else:
+                        messagebox.showwarning("Предупреждение", "Файлы не сохранены!")
+
+                self.root_window.after(0, show_result)
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    def save_oscilloscope_csv(self):
-        if not self.oscilloscope_connected:
+
+    def capture_and_save_normal_waveform(self):
+        self.capture_and_save_waveform(averaged=False, format_type="both")
+
+
+    def capture_and_save_averaged_waveform(self):
+        average_count = 64
+
+        try:
+            if self.oscilloscope_average_spin:
+                average_count = int(self.oscilloscope_average_spin.get())
+        except:
+            average_count = 64
+
+        self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="both")
+
+
+    def capture_and_save_normal_waveform_csv(self):
+        self.capture_and_save_waveform(averaged=False, format_type="csv")
+
+
+    def capture_and_save_normal_waveform_png(self):
+        self.capture_and_save_waveform(averaged=False, format_type="png")
+
+
+    def capture_and_save_averaged_waveform_csv(self):
+        average_count = 64
+
+        try:
+            if self.oscilloscope_average_spin:
+                average_count = int(self.oscilloscope_average_spin.get())
+        except:
+            average_count = 64
+
+        self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="csv")
+
+
+    def capture_and_save_averaged_waveform_png(self):
+        average_count = 64
+
+        try:
+            if self.oscilloscope_average_spin:
+                average_count = int(self.oscilloscope_average_spin.get())
+        except:
+            average_count = 64
+
+        self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="png")
+
+
+    def refresh_energymeter_power(self):
+        if self.energymeter_connected:
+            try:
+                power = self.energymeter_device.get_power()
+                self._safe_label_configuration(self.status_labels.get("energymeter_power"), text=f"{power:.6e} Вт")
+            except:
+                pass
+
+
+    def measure_average_energymeter_power(self):
+        if not self.energymeter_connected:
             return
+
         def task():
             try:
-                channel = int(self.status_labels["oscilloscope_channel"].get())
-                fname = f"waveform_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.csv"
-                path = os.path.join(os.getcwd(), fname)
-                time_vals, volt_vals = self.oscilloscope_device.capture_waveform(channel, 2000)
-                if time_vals and volt_vals:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write("time_seconds,voltage_volts\n")
-                        for t, v in zip(time_vals, volt_vals):
-                            f.write(f"{t:.8e},{v:.6f}\n")
-                    messagebox.showinfo("Успех", f"Данные сохранены: {fname}")
-            except Exception:
+                count = int(self.status_labels.get("energymeter_average_count", tk.StringVar(value="10")).get())
+                average = self.energymeter_device.get_average_power(count, 0.1)
+                self._safe_label_configuration(self.status_labels.get("energymeter_average_power"), text=f"{average:.6e} Вт")
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    # =====================================================
-    # УПРАВЛЕНИЕ ЭНЕРГОМЕТРОМ
-    # =====================================================
 
-    def refresh_powermeter_power(self):
-        if self.powermeter_connected:
+    def increase_energymeter_scale(self):
+        if self.energymeter_connected:
             try:
-                power = self.powermeter_device.get_power()
-                self._safe_label_config(self.status_labels.get("powermeter_power"), text=f"{power:.6e} Вт")
-            except Exception:
+                self.energymeter_device.set_scale_up()
+                self.update_energymeter_status()
+            except:
                 pass
 
-    def measure_average_powermeter_power(self):
-        if not self.powermeter_connected:
+
+    def decrease_energymeter_scale(self):
+        if self.energymeter_connected:
+            try:
+                self.energymeter_device.set_scale_down()
+                self.update_energymeter_status()
+            except:
+                pass
+
+
+    def set_energymeter_scale(self, entry):
+        if not self.energymeter_connected:
             return
+
         def task():
             try:
-                count = int(self.status_labels.get("powermeter_average_count", tk.StringVar(value="10")).get())
-                avg = self.powermeter_device.get_average_power(count, 0.1)
-                self._safe_label_config(self.status_labels.get("powermeter_average_power"), text=f"{avg:.6e} Вт")
-            except Exception:
+                scale_index = int(entry.get())
+                if 0 <= scale_index <= 41:
+                    self.energymeter_device.set_scale(scale_index)
+                    self.update_energymeter_status()
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    def increase_powermeter_scale(self):
-        if self.powermeter_connected:
-            self.powermeter_device.set_scale_up()
-            self.update_powermeter_status()
 
-    def decrease_powermeter_scale(self):
-        if self.powermeter_connected:
-            self.powermeter_device.set_scale_down()
-            self.update_powermeter_status()
+    def enable_energymeter_autoscale(self):
+        if self.energymeter_connected:
+            try:
+                self.energymeter_device.set_autoscale(True)
+                self.update_energymeter_status()
+            except:
+                pass
 
-    def set_powermeter_scale(self, entry):
-        if not self.powermeter_connected:
+
+    def disable_energymeter_autoscale(self):
+        if self.energymeter_connected:
+            try:
+                self.energymeter_device.set_autoscale(False)
+                self.update_energymeter_status()
+            except:
+                pass
+
+
+    def set_energymeter_wavelength(self, entry):
+        if not self.energymeter_connected:
             return
+
         def task():
             try:
-                idx = int(entry.get())
-                if 0 <= idx <= 41:
-                    self.powermeter_device.set_scale(idx)
-                    self.update_powermeter_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите число от 0 до 41")
-            except Exception:
+                wavelength = int(entry.get())
+                self.energymeter_device.set_wavelength_nanometers(wavelength)
+                self.update_energymeter_status()
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    def enable_powermeter_autoscale(self):
-        if self.powermeter_connected:
-            self.powermeter_device.set_autoscale(True)
-            self.update_powermeter_status()
 
-    def disable_powermeter_autoscale(self):
-        if self.powermeter_connected:
-            self.powermeter_device.set_autoscale(False)
-            self.update_powermeter_status()
-
-    def set_powermeter_wavelength(self, entry):
-        if not self.powermeter_connected:
-            return
-        def task():
+    def zero_energymeter(self):
+        if self.energymeter_connected:
             try:
-                wl = int(entry.get())
-                self.powermeter_device.set_wavelength_nanometers(wl)
-                self.update_powermeter_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректное целое число")
-            except Exception:
+                self.energymeter_device.set_zero_offset()
+                self.update_energymeter_status()
+            except:
                 pass
-        threading.Thread(target=task, daemon=True).start()
 
-    def zero_powermeter(self):
-        """Обнуление энергометра (Zero)."""
-        if self.powermeter_connected:
-            self.powermeter_device.set_zero_offset()
-            self.update_powermeter_status()
 
-    def set_powermeter_trigger_level(self, entry):
-        """Установка уровня триггера энергометра."""
-        if not self.powermeter_connected:
+    def set_energymeter_trigger_level(self, entry):
+        if not self.energymeter_connected:
             return
+
         def task():
             try:
                 level = float(entry.get())
                 if 0.1 <= level <= 99.9:
-                    self.powermeter_device.set_trigger_level(level)
-                    self.update_powermeter_status()
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите число от 0.1 до 99.9")
-            except Exception:
+                    self.energymeter_device.set_trigger_level(level)
+                    self.update_energymeter_status()
+            except:
                 pass
+
         threading.Thread(target=task, daemon=True).start()
 
-    # =====================================================
-    # СОЗДАНИЕ GUI
-    # =====================================================
+
+    def create_centered_frame(self, parent, title):
+        container = ttk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        top_spacer = ttk.Frame(container, height=0)
+        top_spacer.pack(fill=tk.BOTH, expand=True)
+
+        frame = ttk.LabelFrame(container, text=title, padding=10)
+        frame.pack(fill=tk.NONE, expand=False, padx=10, pady=10)
+
+        bottom_spacer = ttk.Frame(container, height=0)
+        bottom_spacer.pack(fill=tk.BOTH, expand=True)
+
+        return frame
+
 
     def create_chromator_tab(self, parent):
         tab = ttk.Frame(parent)
-        main_frame = ttk.LabelFrame(tab, text="Монохроматор:", padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = self.create_centered_frame(tab, "Монохроматор:")
 
-        # Подключение
-        conn_frame = ttk.Frame(main_frame)
-        conn_frame.pack(fill=tk.X, pady=5)
-        center = ttk.Frame(conn_frame)
+        connection_frame = ttk.Frame(main_frame)
+        connection_frame.pack(fill=tk.X, pady=5)
+        center = ttk.Frame(connection_frame)
         center.pack(anchor="center")
 
-        btn_connect = ttk.Button(center, text="Подключить", width=16)
-        btn_disconnect = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
-        btn_connect.pack(side=tk.LEFT, padx=5)
-        btn_disconnect.pack(side=tk.LEFT, padx=5)
+        connect_button = ttk.Button(center, text="Подключить", width=16)
+        disconnect_button = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
+        connect_button.pack(side=tk.LEFT, padx=5)
+        disconnect_button.pack(side=tk.LEFT, padx=5)
 
-        self.control_buttons["chromator_connect"] = btn_connect
-        self.control_buttons["chromator_disconnect"] = btn_disconnect
-        self.control_buttons["chromator"] = [btn_disconnect]
+        self.control_buttons["chromator_connect"] = connect_button
+        self.control_buttons["chromator_disconnect"] = disconnect_button
+        self.control_buttons["chromator"] = [disconnect_button]
 
-        btn_connect.config(command=self.connect_chromator)
-        btn_disconnect.config(command=self.disconnect_chromator)
+        connect_button.config(command=self.connect_chromator)
+        disconnect_button.config(command=self.disconnect_chromator)
 
-        # Статус
         status_frame = ttk.LabelFrame(main_frame, text="Состояние:", padding=10)
         status_frame.pack(fill=tk.X, pady=5)
         grid = ttk.Frame(status_frame)
@@ -1022,92 +1412,87 @@ class DeviceManager:
         self.status_labels["chromator_grating_count"] = ttk.Label(grid, text="0")
         self.status_labels["chromator_grating_count"].grid(row=6, column=1, sticky="w", padx=5, pady=2)
 
-        # Управление
-        ctrl_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
-        ctrl_frame.pack(fill=tk.X, pady=5)
-        ctrl_frame.columnconfigure(0, weight=1)
-        ctrl_frame.columnconfigure(1, weight=0)
-        ctrl_frame.columnconfigure(2, weight=0)
+        control_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
+        control_frame.pack(fill=tk.X, pady=5)
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=0)
+        control_frame.columnconfigure(2, weight=0)
 
-        ttk.Label(ctrl_frame, text="Длина волны (нм):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        wl_entry = ttk.Entry(ctrl_frame, width=16)
-        wl_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_chromator_wavelength(wl_entry)).grid(row=0, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Длина волны (нм):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        wavelength_entry = ttk.Entry(control_frame, width=16)
+        wavelength_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_chromator_wavelength(wavelength_entry)).grid(row=0, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Входная щель (мкм):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        input_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Входная щель (мкм):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        input_entry = ttk.Entry(control_frame, width=16)
         input_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_chromator_input_slit(input_entry)).grid(row=1, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_chromator_input_slit(input_entry)).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Выходная щель (мкм):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        output_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Выходная щель (мкм):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        output_entry = ttk.Entry(control_frame, width=16)
         output_entry.grid(row=2, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_chromator_output_slit(output_entry)).grid(row=2, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_chromator_output_slit(output_entry)).grid(row=2, column=2, padx=5, pady=2)
 
-        # Затвор
-        shutter_frame = ttk.Frame(ctrl_frame)
+        shutter_frame = ttk.Frame(control_frame)
         shutter_frame.grid(row=3, column=0, columnspan=3, pady=5)
         shutter_center = ttk.Frame(shutter_frame)
         shutter_center.pack(anchor="center")
         ttk.Button(shutter_center, text="Открыть затвор", width=16, command=self.open_chromator_shutter).pack(side=tk.LEFT, padx=5)
         ttk.Button(shutter_center, text="Закрыть затвор", width=16, command=self.close_chromator_shutter).pack(side=tk.LEFT, padx=5)
 
-        # Решётка
-        grating_frame = ttk.Frame(ctrl_frame)
+        grating_frame = ttk.Frame(control_frame)
         grating_frame.grid(row=4, column=0, columnspan=3, pady=5)
         grating_center = ttk.Frame(grating_frame)
         grating_center.pack(anchor="center")
         ttk.Label(grating_center, text="Номер решётки:").pack(side=tk.LEFT, padx=5)
-        grating_spin = ttk.Spinbox(grating_center, from_=0, to=10, width=12)
-        grating_spin.pack(side=tk.LEFT, padx=5)
-        ttk.Button(grating_center, text="Выбрать", width=12, command=lambda: self.set_chromator_grating(grating_spin)).pack(side=tk.LEFT, padx=5)
+        grating_spinbox = ttk.Spinbox(grating_center, from_=0, to=10, width=12)
+        grating_spinbox.pack(side=tk.LEFT, padx=5)
+        ttk.Button(grating_center, text="Выбрать", width=12, command=lambda: self.set_chromator_grating(grating_spinbox)).pack(side=tk.LEFT, padx=5)
         ttk.Button(grating_center, text="Сброс", width=12, command=self.reset_chromator_grating).pack(side=tk.LEFT, padx=5)
 
-        # Фильтры
-        filter_frame = ttk.Frame(ctrl_frame)
+        filter_frame = ttk.Frame(control_frame)
         filter_frame.grid(row=5, column=0, columnspan=3, pady=5)
         filter_center = ttk.Frame(filter_frame)
         filter_center.pack(anchor="center")
         ttk.Label(filter_center, text="Фильтр:").pack(side=tk.LEFT, padx=5)
-        filter_combo = ttk.Combobox(filter_center, values=["0 - Без фильтра", "1 - Фильтр 1", "2 - Фильтр 2"], width=20, state="readonly")
-        filter_combo.set("0 - Без фильтра")
-        filter_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Button(filter_center, text="Установить", width=14, command=lambda: self.set_chromator_filter(filter_combo)).pack(side=tk.LEFT, padx=5)
+        filter_combobox = ttk.Combobox(filter_center, values=["0 - Без фильтра", "1 - Фильтр 1", "2 - Фильтр 2"], width=20, state="readonly")
+        filter_combobox.set("0 - Без фильтра")
+        filter_combobox.pack(side=tk.LEFT, padx=5)
+        ttk.Button(filter_center, text="Установить", width=14, command=lambda: self.set_chromator_filter(filter_combobox)).pack(side=tk.LEFT, padx=5)
 
-        # Зеркала
-        mirror_frame = ttk.Frame(ctrl_frame)
+        mirror_frame = ttk.Frame(control_frame)
         mirror_frame.grid(row=6, column=0, columnspan=3, pady=5)
         mirror_center = ttk.Frame(mirror_frame)
         mirror_center.pack(anchor="center")
         ttk.Label(mirror_center, text="Выходной порт:").pack(side=tk.LEFT, padx=5)
-        mirror_combo = ttk.Combobox(mirror_center, values=["Осевой", "Боковой"], width=15, state="readonly")
-        mirror_combo.set("Осевой")
-        mirror_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Button(mirror_center, text="Установить", width=14, command=lambda: self.set_chromator_mirror(mirror_combo)).pack(side=tk.LEFT, padx=5)
+        mirror_combobox = ttk.Combobox(mirror_center, values=["Осевой", "Боковой"], width=15, state="readonly")
+        mirror_combobox.set("Осевой")
+        mirror_combobox.pack(side=tk.LEFT, padx=5)
+        ttk.Button(mirror_center, text="Установить", width=14, command=lambda: self.set_chromator_mirror(mirror_combobox)).pack(side=tk.LEFT, padx=5)
 
         return tab
 
+
     def create_laser_tab(self, parent):
         tab = ttk.Frame(parent)
-        main_frame = ttk.LabelFrame(tab, text="Лазер:", padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = self.create_centered_frame(tab, "Лазер:")
 
-        conn_frame = ttk.Frame(main_frame)
-        conn_frame.pack(fill=tk.X, pady=5)
-        center = ttk.Frame(conn_frame)
+        connection_frame = ttk.Frame(main_frame)
+        connection_frame.pack(fill=tk.X, pady=5)
+        center = ttk.Frame(connection_frame)
         center.pack(anchor="center")
 
-        btn_connect = ttk.Button(center, text="Подключить", width=16)
-        btn_disconnect = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
-        btn_connect.pack(side=tk.LEFT, padx=5)
-        btn_disconnect.pack(side=tk.LEFT, padx=5)
+        connect_button = ttk.Button(center, text="Подключить", width=16)
+        disconnect_button = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
+        connect_button.pack(side=tk.LEFT, padx=5)
+        disconnect_button.pack(side=tk.LEFT, padx=5)
 
-        self.control_buttons["laser_connect"] = btn_connect
-        self.control_buttons["laser_disconnect"] = btn_disconnect
-        self.control_buttons["laser"] = [btn_disconnect]
+        self.control_buttons["laser_connect"] = connect_button
+        self.control_buttons["laser_disconnect"] = disconnect_button
+        self.control_buttons["laser"] = [disconnect_button]
 
-        btn_connect.config(command=self.connect_laser)
-        btn_disconnect.config(command=self.disconnect_laser)
+        connect_button.config(command=self.connect_laser)
+        disconnect_button.config(command=self.disconnect_laser)
 
         status_frame = ttk.LabelFrame(main_frame, text="Состояние:", padding=10)
         status_frame.pack(fill=tk.X, pady=5)
@@ -1139,47 +1524,47 @@ class DeviceManager:
         self.status_labels["laser_shutter"] = ttk.Label(grid, text="---")
         self.status_labels["laser_shutter"].grid(row=5, column=1, sticky="w", padx=5, pady=2)
 
-        ctrl_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
-        ctrl_frame.pack(fill=tk.X, pady=5)
-        ctrl_frame.columnconfigure(0, weight=1)
-        ctrl_frame.columnconfigure(1, weight=0)
-        ctrl_frame.columnconfigure(2, weight=0)
+        control_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
+        control_frame.pack(fill=tk.X, pady=5)
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=0)
+        control_frame.columnconfigure(2, weight=0)
 
-        ttk.Label(ctrl_frame, text="Длина волны (нм):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        wl_entry = ttk.Entry(ctrl_frame, width=16)
-        wl_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_laser_wavelength(wl_entry)).grid(row=0, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Длина волны (нм):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        wavelength_entry = ttk.Entry(control_frame, width=16)
+        wavelength_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_laser_wavelength(wavelength_entry)).grid(row=0, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Абсолютное положение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        abs_entry = ttk.Entry(ctrl_frame, width=16)
-        abs_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_laser_absolute_position(abs_entry)).grid(row=1, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Абсолютное положение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        absolute_entry = ttk.Entry(control_frame, width=16)
+        absolute_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_laser_absolute_position(absolute_entry)).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Относительное смещение:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        rel_entry = ttk.Entry(ctrl_frame, width=16)
-        rel_entry.grid(row=2, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Переместить", width=14, command=lambda: self.set_laser_relative_position(rel_entry)).grid(row=2, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Относительное смещение:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        relative_entry = ttk.Entry(control_frame, width=16)
+        relative_entry.grid(row=2, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Переместить", width=14, command=lambda: self.set_laser_relative_position(relative_entry)).grid(row=2, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Скорость (шаги/с):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        speed_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Скорость (шаги/с):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        speed_entry = ttk.Entry(control_frame, width=16)
         speed_entry.grid(row=3, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_laser_speed(speed_entry)).grid(row=3, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_laser_speed(speed_entry)).grid(row=3, column=2, padx=5, pady=2)
 
-        motor_frame = ttk.Frame(ctrl_frame)
+        motor_frame = ttk.Frame(control_frame)
         motor_frame.grid(row=4, column=0, columnspan=3, pady=5)
         motor_center = ttk.Frame(motor_frame)
         motor_center.pack(anchor="center")
         ttk.Button(motor_center, text="Включить двигатель", width=18, command=self.enable_laser_motor).pack(side=tk.LEFT, padx=5)
         ttk.Button(motor_center, text="Отключить двигатель", width=18, command=self.disable_laser_motor).pack(side=tk.LEFT, padx=5)
 
-        shutter_frame = ttk.Frame(ctrl_frame)
+        shutter_frame = ttk.Frame(control_frame)
         shutter_frame.grid(row=5, column=0, columnspan=3, pady=5)
         shutter_center = ttk.Frame(shutter_frame)
         shutter_center.pack(anchor="center")
         ttk.Button(shutter_center, text="Открыть затвор", width=16, command=self.open_laser_shutter).pack(side=tk.LEFT, padx=5)
         ttk.Button(shutter_center, text="Закрыть затвор", width=16, command=self.close_laser_shutter).pack(side=tk.LEFT, padx=5)
 
-        reset_frame = ttk.Frame(ctrl_frame)
+        reset_frame = ttk.Frame(control_frame)
         reset_frame.grid(row=6, column=0, columnspan=3, pady=5)
         reset_center = ttk.Frame(reset_frame)
         reset_center.pack(anchor="center")
@@ -1187,27 +1572,27 @@ class DeviceManager:
 
         return tab
 
+
     def create_oscilloscope_tab(self, parent):
         tab = ttk.Frame(parent)
-        main_frame = ttk.LabelFrame(tab, text="Осциллограф:", padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = self.create_centered_frame(tab, "Осциллограф:")
 
-        conn_frame = ttk.Frame(main_frame)
-        conn_frame.pack(fill=tk.X, pady=5)
-        center = ttk.Frame(conn_frame)
+        connection_frame = ttk.Frame(main_frame)
+        connection_frame.pack(fill=tk.X, pady=5)
+        center = ttk.Frame(connection_frame)
         center.pack(anchor="center")
 
-        btn_connect = ttk.Button(center, text="Подключить", width=16)
-        btn_disconnect = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
-        btn_connect.pack(side=tk.LEFT, padx=5)
-        btn_disconnect.pack(side=tk.LEFT, padx=5)
+        connect_button = ttk.Button(center, text="Подключить", width=16)
+        disconnect_button = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
+        connect_button.pack(side=tk.LEFT, padx=5)
+        disconnect_button.pack(side=tk.LEFT, padx=5)
 
-        self.control_buttons["oscilloscope_connect"] = btn_connect
-        self.control_buttons["oscilloscope_disconnect"] = btn_disconnect
-        self.control_buttons["oscilloscope"] = [btn_disconnect]
+        self.control_buttons["oscilloscope_connect"] = connect_button
+        self.control_buttons["oscilloscope_disconnect"] = disconnect_button
+        self.control_buttons["oscilloscope"] = [disconnect_button]
 
-        btn_connect.config(command=self.connect_oscilloscope)
-        btn_disconnect.config(command=self.disconnect_oscilloscope)
+        connect_button.config(command=self.connect_oscilloscope)
+        disconnect_button.config(command=self.disconnect_oscilloscope)
 
         status_frame = ttk.LabelFrame(main_frame, text="Состояние:", padding=10)
         status_frame.pack(fill=tk.X, pady=5)
@@ -1220,10 +1605,10 @@ class DeviceManager:
         self.status_labels["oscilloscope_status"].grid(row=0, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Номер канала:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["oscilloscope_channel"] = tk.StringVar(value="1")
-        channel_combo = ttk.Combobox(grid, textvariable=self.status_labels["oscilloscope_channel"], values=["1", "2", "3", "4"], width=14, state="readonly")
-        channel_combo.grid(row=1, column=1, sticky="w", padx=5, pady=2)
-        channel_combo.bind("<<ComboboxSelected>>", lambda e: self.update_oscilloscope_status())
+        self.oscilloscope_channel_variable = tk.StringVar(value="1")
+        channel_combobox = ttk.Combobox(grid, textvariable=self.oscilloscope_channel_variable, values=["1", "2", "3", "4"], width=14, state="readonly")
+        channel_combobox.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        channel_combobox.bind("<<ComboboxSelected>>", lambda event: self.update_oscilloscope_status())
 
         ttk.Label(grid, text="Вертикальный масштаб:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.status_labels["oscilloscope_scale"] = ttk.Label(grid, text="--- В/дел")
@@ -1253,47 +1638,46 @@ class DeviceManager:
         self.status_labels["oscilloscope_average"] = ttk.Label(grid, text="---")
         self.status_labels["oscilloscope_average"].grid(row=8, column=1, sticky="w", padx=5, pady=2)
 
-        ctrl_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
-        ctrl_frame.pack(fill=tk.X, pady=5)
-        ctrl_frame.columnconfigure(0, weight=1)
-        ctrl_frame.columnconfigure(1, weight=0)
-        ctrl_frame.columnconfigure(2, weight=0)
+        control_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
+        control_frame.pack(fill=tk.X, pady=5)
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=0)
+        control_frame.columnconfigure(2, weight=0)
 
-        ttk.Label(ctrl_frame, text="Вертикальный масштаб:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        scale_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Вертикальный масштаб:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        scale_entry = ttk.Entry(control_frame, width=16)
         scale_entry.grid(row=0, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_scale(scale_entry)).grid(row=0, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_scale(scale_entry)).grid(row=0, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Вертикальное смещение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        offset_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Вертикальное смещение:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        offset_entry = ttk.Entry(control_frame, width=16)
         offset_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_offset(offset_entry)).grid(row=1, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_offset(offset_entry)).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Тип связи:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        coupling_combo = ttk.Combobox(ctrl_frame, values=["DC", "AC", "GND"], width=14, state="readonly")
-        coupling_combo.set("DC")
-        coupling_combo.grid(row=2, column=1, sticky="w", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_coupling(coupling_combo)).grid(row=2, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Тип связи:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        coupling_combobox = ttk.Combobox(control_frame, values=["DC", "AC", "GND"], width=14, state="readonly")
+        coupling_combobox.set("DC")
+        coupling_combobox.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_coupling(coupling_combobox)).grid(row=2, column=2, padx=5, pady=2)
 
-        channel_frame = ttk.Frame(ctrl_frame)
+        channel_frame = ttk.Frame(control_frame)
         channel_frame.grid(row=3, column=0, columnspan=3, pady=5)
         channel_center = ttk.Frame(channel_frame)
         channel_center.pack(anchor="center")
         ttk.Button(channel_center, text="Включить канал", width=16, command=self.enable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
         ttk.Button(channel_center, text="Отключить канал", width=16, command=self.disable_oscilloscope_channel).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(ctrl_frame, text="Горизонтальный масштаб:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        timebase_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Горизонтальный масштаб:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        timebase_entry = ttk.Entry(control_frame, width=16)
         timebase_entry.grid(row=4, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_timebase(timebase_entry)).grid(row=4, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_timebase(timebase_entry)).grid(row=4, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Кол-во кадров:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
-        avg_entry = ttk.Entry(ctrl_frame, width=16)
-        avg_entry.grid(row=5, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_average(avg_entry)).grid(row=5, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Кол-во кадров:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        average_entry = ttk.Entry(control_frame, width=16)
+        average_entry.grid(row=5, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_average_count(average_entry)).grid(row=5, column=2, padx=5, pady=2)
 
-        # Триггер
-        trigger_frame = ttk.LabelFrame(ctrl_frame, text="Триггер:", padding=5)
+        trigger_frame = ttk.LabelFrame(control_frame, text="Триггер:", padding=5)
         trigger_frame.grid(row=6, column=0, columnspan=3, pady=5, sticky="ew")
         trigger_frame.columnconfigure(0, weight=1)
         trigger_frame.columnconfigure(1, weight=0)
@@ -1306,68 +1690,88 @@ class DeviceManager:
         ttk.Button(trigger_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_trigger_source(trigger_source)).grid(row=0, column=2, padx=5, pady=2)
 
         ttk.Label(trigger_frame, text="Уровень (В):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        trig_level_entry = ttk.Entry(trigger_frame, width=16)
-        trig_level_entry.grid(row=1, column=1, sticky="w", padx=5, pady=2)
-        ttk.Button(trigger_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_trigger_level(trig_level_entry)).grid(row=1, column=2, padx=5, pady=2)
+        trigger_level_entry = ttk.Entry(trigger_frame, width=16)
+        trigger_level_entry.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        ttk.Button(trigger_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_trigger_level(trigger_level_entry)).grid(row=1, column=2, padx=5, pady=2)
 
         ttk.Label(trigger_frame, text="Наклон:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        trig_slope = ttk.Combobox(trigger_frame, values=["POS", "NEG", "EITH"], width=14, state="readonly")
-        trig_slope.set("POS")
-        trig_slope.grid(row=2, column=1, sticky="w", padx=5, pady=2)
-        ttk.Button(trigger_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_trigger_slope(trig_slope)).grid(row=2, column=2, padx=5, pady=2)
+        trigger_slope = ttk.Combobox(trigger_frame, values=["POS", "NEG", "EITH"], width=14, state="readonly")
+        trigger_slope.set("POS")
+        trigger_slope.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        ttk.Button(trigger_frame, text="Установить", width=14, command=lambda: self.set_oscilloscope_trigger_slope(trigger_slope)).grid(row=2, column=2, padx=5, pady=2)
 
-        # Импеданс
-        imp_frame = ttk.Frame(ctrl_frame)
-        imp_frame.grid(row=7, column=0, columnspan=3, pady=5)
-        imp_center = ttk.Frame(imp_frame)
-        imp_center.pack(anchor="center")
-        ttk.Label(imp_center, text="Импеданс:").pack(side=tk.LEFT, padx=5)
-        imp_combo = ttk.Combobox(imp_center, values=["1 МОм", "50 Ом"], width=12, state="readonly")
-        imp_combo.set("1 МОм")
-        imp_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Button(imp_center, text="Установить", width=14, command=lambda: self.set_oscilloscope_impedance(imp_combo)).pack(side=tk.LEFT, padx=5)
+        impedance_frame = ttk.Frame(control_frame)
+        impedance_frame.grid(row=7, column=0, columnspan=3, pady=5)
+        impedance_center = ttk.Frame(impedance_frame)
+        impedance_center.pack(anchor="center")
+        ttk.Label(impedance_center, text="Импеданс:").pack(side=tk.LEFT, padx=5)
+        impedance_combobox = ttk.Combobox(impedance_center, values=["1 МОм", "50 Ом"], width=12, state="readonly")
+        impedance_combobox.set("1 МОм")
+        impedance_combobox.pack(side=tk.LEFT, padx=5)
+        ttk.Button(impedance_center, text="Установить", width=14, command=lambda: self.set_oscilloscope_impedance(impedance_combobox)).pack(side=tk.LEFT, padx=5)
 
-        # Сбор данных
-        acq_frame = ttk.Frame(ctrl_frame)
-        acq_frame.grid(row=8, column=0, columnspan=3, pady=5)
-        acq_center = ttk.Frame(acq_frame)
-        acq_center.pack(anchor="center")
-        ttk.Button(acq_center, text="Запустить", width=14, command=self.run_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
-        ttk.Button(acq_center, text="Остановить", width=14, command=self.stop_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
-        ttk.Button(acq_center, text="Однократно", width=14, command=self.single_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
-        ttk.Button(acq_center, text="Принудить", width=14, command=self.force_oscilloscope_trigger).pack(side=tk.LEFT, padx=5)
+        acquisition_frame = ttk.Frame(control_frame)
+        acquisition_frame.grid(row=8, column=0, columnspan=3, pady=5)
+        acquisition_center = ttk.Frame(acquisition_frame)
+        acquisition_center.pack(anchor="center")
+        ttk.Button(acquisition_center, text="Запустить", width=14, command=self.run_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
+        ttk.Button(acquisition_center, text="Остановить", width=14, command=self.stop_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
+        ttk.Button(acquisition_center, text="Однократно", width=14, command=self.single_oscilloscope_acquisition).pack(side=tk.LEFT, padx=5)
+        ttk.Button(acquisition_center, text="Принудить", width=14, command=self.force_oscilloscope_trigger).pack(side=tk.LEFT, padx=5)
 
-        # Сохранение
-        save_frame = ttk.Frame(ctrl_frame)
-        save_frame.grid(row=9, column=0, columnspan=3, pady=5)
-        save_center = ttk.Frame(save_frame)
-        save_center.pack(anchor="center")
-        ttk.Button(save_center, text="Скриншот", width=16, command=self.save_oscilloscope_screenshot).pack(side=tk.LEFT, padx=5)
-        ttk.Button(save_center, text="Сохранить CSV", width=16, command=self.save_oscilloscope_csv).pack(side=tk.LEFT, padx=5)
+        capture_frame = ttk.LabelFrame(main_frame, text="Захват сигнала:", padding=10)
+        capture_frame.pack(fill=tk.X, pady=5)
+
+        average_frame = ttk.Frame(capture_frame)
+        average_frame.pack(fill=tk.X, pady=2)
+        average_center = ttk.Frame(average_frame)
+        average_center.pack(anchor="center")
+        ttk.Label(average_center, text="Кадров для усреднения:").pack(side=tk.LEFT, padx=5)
+        self.oscilloscope_average_spin = ttk.Spinbox(average_center, from_=2, to=1024, width=10)
+        self.oscilloscope_average_spin.set("64")
+        self.oscilloscope_average_spin.pack(side=tk.LEFT, padx=5)
+
+        normal_capture_frame = ttk.Frame(capture_frame)
+        normal_capture_frame.pack(fill=tk.X, pady=2)
+        normal_capture_center = ttk.Frame(normal_capture_frame)
+        normal_capture_center.pack(anchor="center")
+        ttk.Label(normal_capture_center, text="Обычный:").pack(side=tk.LEFT, padx=5)
+        ttk.Button(normal_capture_center, text="CSV", width=10, command=self.capture_and_save_normal_waveform_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(normal_capture_center, text="PNG", width=10, command=self.capture_and_save_normal_waveform_png).pack(side=tk.LEFT, padx=2)
+        ttk.Button(normal_capture_center, text="Оба", width=10, command=self.capture_and_save_normal_waveform).pack(side=tk.LEFT, padx=2)
+
+        averaged_capture_frame = ttk.Frame(capture_frame)
+        averaged_capture_frame.pack(fill=tk.X, pady=2)
+        averaged_capture_center = ttk.Frame(averaged_capture_frame)
+        averaged_capture_center.pack(anchor="center")
+        ttk.Label(averaged_capture_center, text="Усреднённый:").pack(side=tk.LEFT, padx=5)
+        ttk.Button(averaged_capture_center, text="CSV", width=10, command=self.capture_and_save_averaged_waveform_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(averaged_capture_center, text="PNG", width=10, command=self.capture_and_save_averaged_waveform_png).pack(side=tk.LEFT, padx=2)
+        ttk.Button(averaged_capture_center, text="Оба", width=10, command=self.capture_and_save_averaged_waveform).pack(side=tk.LEFT, padx=2)
 
         return tab
 
-    def create_powermeter_tab(self, parent):
-        tab = ttk.Frame(parent)
-        main_frame = ttk.LabelFrame(tab, text="Энергометр:", padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        conn_frame = ttk.Frame(main_frame)
-        conn_frame.pack(fill=tk.X, pady=5)
-        center = ttk.Frame(conn_frame)
+    def create_energymeter_tab(self, parent):
+        tab = ttk.Frame(parent)
+        main_frame = self.create_centered_frame(tab, "Энергометр:")
+
+        connection_frame = ttk.Frame(main_frame)
+        connection_frame.pack(fill=tk.X, pady=5)
+        center = ttk.Frame(connection_frame)
         center.pack(anchor="center")
 
-        btn_connect = ttk.Button(center, text="Подключить", width=16)
-        btn_disconnect = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
-        btn_connect.pack(side=tk.LEFT, padx=5)
-        btn_disconnect.pack(side=tk.LEFT, padx=5)
+        connect_button = ttk.Button(center, text="Подключить", width=16)
+        disconnect_button = ttk.Button(center, text="Отключить", width=16, state=tk.DISABLED)
+        connect_button.pack(side=tk.LEFT, padx=5)
+        disconnect_button.pack(side=tk.LEFT, padx=5)
 
-        self.control_buttons["powermeter_connect"] = btn_connect
-        self.control_buttons["powermeter_disconnect"] = btn_disconnect
-        self.control_buttons["powermeter"] = [btn_disconnect]
+        self.control_buttons["energymeter_connect"] = connect_button
+        self.control_buttons["energymeter_disconnect"] = disconnect_button
+        self.control_buttons["energymeter"] = [disconnect_button]
 
-        btn_connect.config(command=self.connect_powermeter)
-        btn_disconnect.config(command=self.disconnect_powermeter)
+        connect_button.config(command=self.connect_energymeter)
+        disconnect_button.config(command=self.disconnect_energymeter)
 
         status_frame = ttk.LabelFrame(main_frame, text="Состояние:", padding=10)
         status_frame.pack(fill=tk.X, pady=5)
@@ -1377,97 +1781,93 @@ class DeviceManager:
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(2, weight=0)
 
-        self.status_labels["powermeter_status"] = ttk.Label(grid, text="Отключен", foreground="black")
-        self.status_labels["powermeter_status"].grid(row=0, column=0, columnspan=3, sticky="w", padx=5, pady=2)
+        self.status_labels["energymeter_status"] = ttk.Label(grid, text="Отключен", foreground="black")
+        self.status_labels["energymeter_status"].grid(row=0, column=0, columnspan=3, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Мощность:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_power"] = ttk.Label(grid, text="--- Вт")
-        self.status_labels["powermeter_power"].grid(row=1, column=1, sticky="w", padx=5, pady=2)
-        ttk.Button(grid, text="Обновить", width=14, command=self.refresh_powermeter_power).grid(row=1, column=2, padx=5, pady=2)
+        self.status_labels["energymeter_power"] = ttk.Label(grid, text="--- Вт")
+        self.status_labels["energymeter_power"].grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        ttk.Button(grid, text="Обновить", width=14, command=self.refresh_energymeter_power).grid(row=1, column=2, padx=5, pady=2)
 
         ttk.Label(grid, text="Кол-во измерений:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_average_count"] = tk.StringVar(value="10")
-        avg_spin = ttk.Spinbox(grid, from_=1, to=100, width=14, textvariable=self.status_labels["powermeter_average_count"])
-        avg_spin.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.status_labels["energymeter_average_count"] = tk.StringVar(value="10")
+        average_spinbox = ttk.Spinbox(grid, from_=1, to=100, width=14, textvariable=self.status_labels["energymeter_average_count"])
+        average_spinbox.grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Средняя мощность:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_average_power"] = ttk.Label(grid, text="--- Вт")
-        self.status_labels["powermeter_average_power"].grid(row=3, column=1, sticky="w", padx=5, pady=2)
-        ttk.Button(grid, text="Измерить", width=14, command=self.measure_average_powermeter_power).grid(row=3, column=2, padx=5, pady=2)
+        self.status_labels["energymeter_average_power"] = ttk.Label(grid, text="--- Вт")
+        self.status_labels["energymeter_average_power"].grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        ttk.Button(grid, text="Измерить", width=14, command=self.measure_average_energymeter_power).grid(row=3, column=2, padx=5, pady=2)
 
         ttk.Label(grid, text="Индекс шкалы:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_scale"] = ttk.Label(grid, text="---")
-        self.status_labels["powermeter_scale"].grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        self.status_labels["energymeter_scale"] = ttk.Label(grid, text="---")
+        self.status_labels["energymeter_scale"].grid(row=4, column=1, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Автошкала:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_autoscale"] = ttk.Label(grid, text="---")
-        self.status_labels["powermeter_autoscale"].grid(row=5, column=1, sticky="w", padx=5, pady=2)
+        self.status_labels["energymeter_autoscale"] = ttk.Label(grid, text="---")
+        self.status_labels["energymeter_autoscale"].grid(row=5, column=1, sticky="w", padx=5, pady=2)
 
         ttk.Label(grid, text="Длина волны:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
-        self.status_labels["powermeter_wavelength"] = ttk.Label(grid, text="--- нм")
-        self.status_labels["powermeter_wavelength"].grid(row=6, column=1, sticky="w", padx=5, pady=2)
+        self.status_labels["energymeter_wavelength"] = ttk.Label(grid, text="--- нм")
+        self.status_labels["energymeter_wavelength"].grid(row=6, column=1, sticky="w", padx=5, pady=2)
 
-        ctrl_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
-        ctrl_frame.pack(fill=tk.X, pady=5)
-        ctrl_frame.columnconfigure(0, weight=1)
-        ctrl_frame.columnconfigure(1, weight=0)
-        ctrl_frame.columnconfigure(2, weight=0)
+        control_frame = ttk.LabelFrame(main_frame, text="Управление:", padding=10)
+        control_frame.pack(fill=tk.X, pady=5)
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=0)
+        control_frame.columnconfigure(2, weight=0)
 
-        scale_btn_frame = ttk.Frame(ctrl_frame)
-        scale_btn_frame.grid(row=0, column=0, columnspan=3, pady=5)
-        scale_center = ttk.Frame(scale_btn_frame)
+        scale_button_frame = ttk.Frame(control_frame)
+        scale_button_frame.grid(row=0, column=0, columnspan=3, pady=5)
+        scale_center = ttk.Frame(scale_button_frame)
         scale_center.pack(anchor="center")
-        ttk.Button(scale_center, text="Увеличить шкалу", width=16, command=self.increase_powermeter_scale).pack(side=tk.LEFT, padx=5)
-        ttk.Button(scale_center, text="Уменьшить шкалу", width=16, command=self.decrease_powermeter_scale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(scale_center, text="Увеличить шкалу", width=16, command=self.increase_energymeter_scale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(scale_center, text="Уменьшить шкалу", width=16, command=self.decrease_energymeter_scale).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(ctrl_frame, text="Индекс шкалы (0-41):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        scale_entry = ttk.Entry(ctrl_frame, width=16)
+        ttk.Label(control_frame, text="Индекс шкалы (0-41):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        scale_entry = ttk.Entry(control_frame, width=16)
         scale_entry.grid(row=1, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_powermeter_scale(scale_entry)).grid(row=1, column=2, padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_energymeter_scale(scale_entry)).grid(row=1, column=2, padx=5, pady=2)
 
-        auto_btn_frame = ttk.Frame(ctrl_frame)
-        auto_btn_frame.grid(row=2, column=0, columnspan=3, pady=5)
-        auto_center = ttk.Frame(auto_btn_frame)
-        auto_center.pack(anchor="center")
-        ttk.Button(auto_center, text="Включить автошкалу", width=18, command=self.enable_powermeter_autoscale).pack(side=tk.LEFT, padx=5)
-        ttk.Button(auto_center, text="Отключить автошкалу", width=18, command=self.disable_powermeter_autoscale).pack(side=tk.LEFT, padx=5)
+        autoscale_button_frame = ttk.Frame(control_frame)
+        autoscale_button_frame.grid(row=2, column=0, columnspan=3, pady=5)
+        autoscale_center = ttk.Frame(autoscale_button_frame)
+        autoscale_center.pack(anchor="center")
+        ttk.Button(autoscale_center, text="Включить автошкалу", width=18, command=self.enable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
+        ttk.Button(autoscale_center, text="Отключить автошкалу", width=18, command=self.disable_energymeter_autoscale).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(ctrl_frame, text="Длина волны (нм):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        wl_entry = ttk.Entry(ctrl_frame, width=16)
-        wl_entry.grid(row=3, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_powermeter_wavelength(wl_entry)).grid(row=3, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Длина волны (нм):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        wavelength_entry = ttk.Entry(control_frame, width=16)
+        wavelength_entry.grid(row=3, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_energymeter_wavelength(wavelength_entry)).grid(row=3, column=2, padx=5, pady=2)
 
-        ttk.Label(ctrl_frame, text="Уровень триггера (%):").grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        trig_entry = ttk.Entry(ctrl_frame, width=16)
-        trig_entry.grid(row=4, column=1, sticky="e", padx=5, pady=2)
-        ttk.Button(ctrl_frame, text="Установить", width=14, command=lambda: self.set_powermeter_trigger_level(trig_entry)).grid(row=4, column=2, padx=5, pady=2)
+        ttk.Label(control_frame, text="Уровень триггера (%):").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        trigger_entry = ttk.Entry(control_frame, width=16)
+        trigger_entry.grid(row=4, column=1, sticky="e", padx=5, pady=2)
+        ttk.Button(control_frame, text="Установить", width=14, command=lambda: self.set_energymeter_trigger_level(trigger_entry)).grid(row=4, column=2, padx=5, pady=2)
 
-        zero_frame = ttk.Frame(ctrl_frame)
+        zero_frame = ttk.Frame(control_frame)
         zero_frame.grid(row=5, column=0, columnspan=3, pady=5)
         zero_center = ttk.Frame(zero_frame)
         zero_center.pack(anchor="center")
-        ttk.Button(zero_center, text="Обнулить (Zero)", width=18, command=self.zero_powermeter).pack(side=tk.LEFT, padx=5)
+        ttk.Button(zero_center, text="Обнулить (Zero)", width=18, command=self.zero_energymeter).pack(side=tk.LEFT, padx=5)
 
         return tab
 
-    # =====================================================
-    # ЗАПУСК GUI
-    # =====================================================
 
     def initialize_user_interface(self):
-        """Запуск графического интерфейса."""
         self.root_window = tk.Tk()
         self.root_window.title("Полное управление оборудованием")
-        self.root_window.geometry("600x750")
+        self.root_window.geometry("700x1000")
         self.root_window.resizable(False, False)
 
-        # Иконка
         icon_path = self.base_path / "icon.png"
+
         if icon_path.exists():
             try:
                 icon = tk.PhotoImage(file=str(icon_path))
                 self.root_window.iconphoto(True, icon)
-            except Exception:
+            except:
                 pass
 
         style = ttk.Style()
@@ -1482,47 +1882,43 @@ class DeviceManager:
         notebook = ttk.Notebook(main_frame)
         notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Создаём вкладки
         notebook.add(self.create_chromator_tab(notebook), text="Монохроматор")
         notebook.add(self.create_laser_tab(notebook), text="Лазер")
         notebook.add(self.create_oscilloscope_tab(notebook), text="Осциллограф")
-        notebook.add(self.create_powermeter_tab(notebook), text="Энергометр")
+        notebook.add(self.create_energymeter_tab(notebook), text="Энергометр")
 
-        # Запускаем обновление статуса
         self.start_auto_update()
 
         self.root_window.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root_window.mainloop()
 
+
     def on_closing(self):
-        """Корректное закрытие приложения."""
         self.stop_auto_update()
-
-        # Отключаем все устройства
-        if self.chromator_device:
-            try:
-                self.chromator_device.disconnect()
-            except Exception:
-                pass
-        if self.laser_source_device:
-            try:
-                self.laser_source_device.disconnect()
-            except Exception:
-                pass
-        if self.oscilloscope_device:
-            try:
-                self.oscilloscope_device.disconnect()
-            except Exception:
-                pass
-        if self.powermeter_device:
-            try:
-                self.powermeter_device.disconnect()
-            except Exception:
-                pass
-
+        self.disconnect_all_devices()
         self.root_window.destroy()
 
 
 if __name__ == "__main__":
-    app = DeviceManager()
-    app.initialize_user_interface()
+    is_first_instance, lock_file = check_single_instance()
+
+    if not is_first_instance:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Ошибка", "Программа уже запущена!")
+            root.destroy()
+        except:
+            pass
+
+        sys.exit(0)
+
+    try:
+        application = DeviceManager()
+        application.initialize_user_interface()
+    finally:
+        if lock_file and lock_file.exists():
+            try:
+                lock_file.unlink()
+            except:
+                pass

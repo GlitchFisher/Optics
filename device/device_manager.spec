@@ -1,4 +1,4 @@
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 folders = [
     'library',
@@ -20,6 +20,9 @@ files += result[0]
 binaries += result[1]
 imports += result[2]
 
+matplotlib_datas = collect_data_files('matplotlib')
+files += matplotlib_datas
+
 analysis = Analysis(
     ['device_manager.py'],
     pathex=[],
@@ -35,13 +38,25 @@ analysis = Analysis(
         'pyvisa_py.usb',
         'pyvisa_py.serial',
         'numpy',
+        'matplotlib',
+        'matplotlib.backends',
+        'matplotlib.backends.backend_agg',
+        'matplotlib.pyplot',
+        'tkinter',
+        'threading',
+        'subprocess',
+        'datetime',
+        'pathlib',
+        'os',
+        'sys',
+        'time',
     ] + imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
-    optimize=0,
+    optimize=0
 )
 
 pyz = PYZ(analysis.pure)

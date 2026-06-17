@@ -7,7 +7,7 @@ from typing import Dict
 from typing import Any
 
 
-class Powermeter:
+class Energymeter:
     def __init__(self):
         self._connection = None
         self._is_connected = False

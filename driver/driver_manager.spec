@@ -35,7 +35,7 @@ analysis = Analysis(
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
-    optimize=0,
+    optimize=0
 )
 
 pyz = PYZ(analysis.pure)
@@ -59,5 +59,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.png',
+    icon='icon.png'
 )
