@@ -1,12 +1,41 @@
-# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
 
+folders = [
+    'library',
+    'sdk',
+    'driver'
+]
 
-a = Analysis(
+files = []
+binaries = []
+imports = []
+
+for folder in folders:
+    files.append((f'../{folder}', folder))
+
+files.append(('icon.png', '.'))
+
+result = collect_all('ctypes')
+files += result[0]
+binaries += result[1]
+imports += result[2]
+
+analysis = Analysis(
     ['device_manager.py'],
     pathex=[],
-    binaries=[],
-    datas=[('../library', 'library'), ('../sdk', 'sdk'), ('../driver', 'driver')],
-    hiddenimports=['serial', 'serial.tools.list_ports', 'pyvisa', 'numpy', 'ctypes', 'ctypes.wintypes'],
+    binaries=binaries,
+    datas=files,
+    hiddenimports=[
+        'serial',
+        'serial.tools.list_ports',
+        'pyvisa',
+        'pyvisa-py',
+        'pyvisa_py',
+        'pyvisa_py.tcpip',
+        'pyvisa_py.usb',
+        'pyvisa_py.serial',
+        'numpy',
+    ] + imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -14,26 +43,27 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-pyz = PYZ(a.pure)
+
+pyz = PYZ(analysis.pure)
 
 exe = EXE(
     pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
+    analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
     [],
-    name='device_manager',
+    name='DeviceManager',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['icon.png'],
+    icon='icon.png'
 )

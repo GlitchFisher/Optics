@@ -69,7 +69,7 @@ class DriverManager:
 
 
     def get_installed_driver_packages(self):
-        result = subprocess.run(["pnputil", "/enum-drivers"], capture_output=True, text=True, shell=True)
+        result = subprocess.run(["pnputil", "/enum-drivers"], capture_output=True, text=True, shell=False, creationflags=CREATE_NO_WINDOW)
         installed_drivers = {}
         lines = result.stdout.split("\n")
 
@@ -137,7 +137,7 @@ class DriverManager:
 
 
     def uninstall_device_by_hardware_id(self, hardware_id):
-        result = subprocess.run(["pnputil", "/remove-device", hardware_id], capture_output=True, text=True, shell=True)
+        result = subprocess.run(["pnputil", "/remove-device", hardware_id], capture_output=True, text=True, shell=False, creationflags=CREATE_NO_WINDOW)
         status = result.returncode == 0
 
         return status
@@ -149,7 +149,7 @@ class DriverManager:
 
         for oem_package_name, driver_name in installed_drivers.items():
             if driver_name == inf_name:
-                result = subprocess.run(["pnputil", "/delete-driver", oem_package_name, "/uninstall"], capture_output=True, text=True, shell=True)
+                result = subprocess.run(["pnputil", "/delete-driver", oem_package_name, "/uninstall"], capture_output=True, text=True, shell=False, creationflags=CREATE_NO_WINDOW)
 
                 if result.returncode == 0:
                     log_widget.insert(tkinter.END, f"❌ Удалён пакет: {oem_package_name}\n")
