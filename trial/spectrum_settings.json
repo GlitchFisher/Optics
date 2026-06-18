@@ -1,0 +1,21 @@
+{
+  "language": "ru",
+  "theme": "dark",
+  "laser_wavelength": 1064.0,
+  "start_wavelength": 1300.0,
+  "end_wavelength": 1400.0,
+  "wavelength_step": 0.5,
+  "input_slit": 100.0,
+  "output_slit": 100.0,
+  "oscilloscope_channel": 1,
+  "average_count": 1024,
+  "power_average_count": 10,
+  "dual_integration": true,
+  "baseline_start": -1e-05,
+  "baseline_end": -2e-06,
+  "signal1_start": -2e-06,
+  "signal1_end": 2e-05,
+  "signal2_start": 1e-05,
+  "signal2_end": 3e-05,
+  "energy_points": 10
+}
