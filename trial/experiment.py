@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 import threading
 import time
-import traceback
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
@@ -25,7 +24,7 @@ sys.path.insert(0, str(library_path))
 try:
     from chromator import Chromator
     from oscilloscope import Oscilloscope
-    from mathematics import integrate_signal, approximate_signal, energy_calibration
+    from mathematics import integrate_signal, approximate_signal
 except ImportError:
     class Chromator:
         def connect(self): return True
@@ -46,6 +45,16 @@ except ImportError:
             time_values = np.linspace(-20e-6, 30e-6, points)
             signal_values = np.exp(-((time_values - 5e-6) ** 2) / (3e-6) ** 2) * 0.5 + np.random.normal(0, 0.02, points)
             return time_values.tolist(), signal_values.tolist()
+        def acquire_averaged_waveform(self, channel, average_count, points):
+            time_values = np.linspace(-20e-6, 30e-6, points)
+            signal_values = np.exp(-((time_values - 5e-6) ** 2) / (3e-6) ** 2) * 0.5 + np.random.normal(0, 0.005, points)
+            return time_values.tolist(), signal_values.tolist()
+        def set_acquisition_type(self, acquisition_type): pass
+        def set_average_count(self, count): pass
+        def set_channel_enabled(self, channel, enable): pass
+        def set_channel_coupling(self, channel, coupling): pass
+        def run_acquisition(self): pass
+        def stop_acquisition(self): pass
     
     def integrate_signal(time_values, signal_values):
         if len(time_values) < 2:
@@ -54,16 +63,11 @@ except ImportError:
     
     def approximate_signal(time_values, signal_values, use_background=True):
         return signal_values, {"fit_successful": True, "signal_amplitude_volts": max(signal_values) - min(signal_values)}
-    
-    def energy_calibration(reference_energies, measured_signals, force_zero=True):
-        return {"calibration_success": True, "detector_sensitivity": 1e-6, "fit_quality": 0.99, "dark_signal_offset": 0}
 
 class SettingsManager:
     def __init__(self):
         self.settings_file = "spectrum_settings.json"
-        self.settings = {
-            'language': 'ru',
-            'theme': 'light',
+        self.default_settings = {
             'laser_wavelength': 1064.0,
             'start_wavelength': 1300.0,
             'end_wavelength': 1400.0,
@@ -81,7 +85,9 @@ class SettingsManager:
             'signal2_start': 10e-6,
             'signal2_end': 30e-6,
             'energy_points': 10,
+            'reference_peak': 1308.0,
         }
+        self.settings = self.default_settings.copy()
         self.load()
     
     def load(self):
@@ -105,6 +111,10 @@ class SettingsManager:
     
     def set(self, key, value):
         self.settings[key] = value
+        self.save()
+    
+    def reset_to_defaults(self):
+        self.settings = self.default_settings.copy()
         self.save()
 
 class CustomTitleBar(QWidget):
@@ -144,7 +154,7 @@ class CustomTitleBar(QWidget):
         self.minimize_button.clicked.connect(self.parent.showMinimized)
         layout.addWidget(self.minimize_button)
         
-        self.maximize_button = QPushButton("□")
+        self.maximize_button = QPushButton("☐")
         self.maximize_button.setFixedSize(30, 25)
         self.maximize_button.clicked.connect(self.toggle_maximize)
         layout.addWidget(self.maximize_button)
@@ -159,31 +169,20 @@ class CustomTitleBar(QWidget):
     def toggle_maximize(self):
         if self.parent.isMaximized():
             self.parent.showNormal()
-            self.maximize_button.setText("□")
+            self.maximize_button.setText("☐")
         else:
             self.parent.showMaximized()
             self.maximize_button.setText("❐")
     
     def update_style(self):
-        theme = self.parent.current_theme if hasattr(self.parent, 'current_theme') else 'light'
-        if theme == 'dark':
-            self.setStyleSheet("""
-                QWidget { background-color: #353535; }
-                QLabel { color: white; }
-                QPushButton { background-color: transparent; color: white; border: none; font-size: 14px; }
-                QPushButton:hover { background-color: #454545; }
-                QPushButton#close_button:hover { background-color: #e81123; }
-            """)
-            self.close_button.setObjectName("close_button")
-        else:
-            self.setStyleSheet("""
-                QWidget { background-color: #f0f0f0; }
-                QLabel { color: black; }
-                QPushButton { background-color: transparent; color: black; border: none; font-size: 14px; }
-                QPushButton:hover { background-color: #e0e0e0; }
-                QPushButton#close_button:hover { background-color: #e81123; color: white; }
-            """)
-            self.close_button.setObjectName("close_button")
+        self.setStyleSheet("""
+            QWidget { background-color: #f0f0f0; }
+            QLabel { color: black; }
+            QPushButton { background-color: transparent; color: black; border: none; font-size: 14px; }
+            QPushButton:hover { background-color: #e0e0e0; }
+            QPushButton#close_button:hover { background-color: #e81123; color: white; }
+        """)
+        self.close_button.setObjectName("close_button")
     
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -323,16 +322,16 @@ class SignalPlotView(QChartView):
         dual_integration = self.parent_widget.settings.get('dual_integration', False)
         
         line_configurations = [
-            (configuration.baseline_start_time_seconds, "Левый\nфон", Qt.red, "baseline_start"),
-            (configuration.baseline_end_time_seconds, "Правый\nфон", Qt.red, "baseline_end"),
-            (configuration.signal_integration_start_time_seconds, "Левый\nсигнал" if not dual_integration else "Левый\nсигнал 1", Qt.green, "signal1_start"),
-            (configuration.signal_integration_end_time_seconds, "Правый\nсигнал" if not dual_integration else "Правый\nсигнал 1", Qt.green, "signal1_end"),
+            (configuration.baseline_start_time_seconds, "Левый фон", Qt.red, "baseline_start"),
+            (configuration.baseline_end_time_seconds, "Правый фон", Qt.red, "baseline_end"),
+            (configuration.signal_integration_start_time_seconds, "Левый сигнал 1" if not dual_integration else "Левый сигнал 1", Qt.green, "signal1_start"),
+            (configuration.signal_integration_end_time_seconds, "Правый сигнал 1" if not dual_integration else "Правый сигнал 1", Qt.green, "signal1_end"),
         ]
         
         if dual_integration:
             line_configurations.extend([
-                (configuration.signal_integration_start_time_seconds_2, "Левый\nсигнал 2", Qt.blue, "signal2_start"),
-                (configuration.signal_integration_end_time_seconds_2, "Правый\nсигнал 2", Qt.blue, "signal2_end"),
+                (configuration.signal_integration_start_time_seconds_2, "Левый сигнал 2", Qt.blue, "signal2_start"),
+                (configuration.signal_integration_end_time_seconds_2, "Правый сигнал 2", Qt.blue, "signal2_end"),
             ])
         
         for position_x, label_text, color, key in line_configurations:
@@ -480,6 +479,9 @@ class MeasurementConfiguration:
         self.signal_integration_end_time_seconds = 20e-6
         self.signal_integration_start_time_seconds_2 = 10e-6
         self.signal_integration_end_time_seconds_2 = 30e-6
+        self.reference_peak_nanometers = 1308.0
+        self.calibration_offset_nanometers = 0.0
+        self.calibration_performed = False
 
 class SpectrumMeasurement:
     def __init__(self):
@@ -502,9 +504,32 @@ class SpectrumMeasurement:
         self.is_scanning = False
         self.is_measuring_energy = False
         self.stop_requested = False
+        self.calibration_offset = 0.0
+        self.calibration_performed = False
+        self.saved_spectrum_data = {
+            'wavelengths': [],
+            'integrated_values': [],
+            'approximated_values': [],
+            'integrated_values_2': [],
+            'approximated_values_2': []
+        }
+        self.saved_energy_data = {
+            'energy_values': [],
+            'integrated_values': [],
+            'approximated_values': [],
+            'integrated_values_2': [],
+            'approximated_values_2': []
+        }
+        self.saved_signal_data = {
+            'time_values': [],
+            'voltage_values': []
+        }
+        self.saved_parameters = {}
+        self.saved_timestamp = ''
     
     def connect_instruments(self):
         connection_success = True
+        
         try:
             self.chromator_device = Chromator()
             if self.chromator_device.connect():
@@ -513,14 +538,17 @@ class SpectrumMeasurement:
                 connection_success = False
         except Exception:
             connection_success = False
+        
         try:
             self.oscilloscope_device = Oscilloscope()
             if self.oscilloscope_device.connect():
                 self.is_oscilloscope_connected = True
+                self.setup_oscilloscope()
             else:
                 connection_success = False
         except Exception:
             connection_success = False
+        
         return connection_success
     
     def disconnect_instruments(self):
@@ -530,16 +558,47 @@ class SpectrumMeasurement:
                 self.is_chromator_connected = False
             except Exception:
                 pass
+        
         if self.oscilloscope_device:
             try:
+                self.restore_oscilloscope_settings()
                 self.oscilloscope_device.disconnect()
                 self.is_oscilloscope_connected = False
             except Exception:
                 pass
     
+    def setup_oscilloscope(self):
+        if self.oscilloscope_device:
+            try:
+                self.oscilloscope_device.set_acquisition_type("AVER")
+                self.oscilloscope_device.set_average_count(self.configuration.oscilloscope_average_count)
+                
+                if self.configuration.oscilloscope_average_count > 256:
+                    time.sleep(min(self.configuration.oscilloscope_average_count / 20, 30.0))
+                
+                self.oscilloscope_device.set_channel_enabled(self.configuration.oscilloscope_signal_channel, True)
+                self.oscilloscope_device.set_channel_scale(self.configuration.oscilloscope_signal_channel, 1.0)
+                self.oscilloscope_device.set_channel_coupling(self.configuration.oscilloscope_signal_channel, "DC")
+                self.oscilloscope_device.set_trigger_source(f"CHAN{self.configuration.oscilloscope_signal_channel}")
+                self.oscilloscope_device.set_trigger_level(0.0)
+                self.oscilloscope_device.set_trigger_slope("POS")
+                self.oscilloscope_device.run_acquisition()
+            except Exception:
+                pass
+    
+    def restore_oscilloscope_settings(self):
+        if self.oscilloscope_device:
+            try:
+                self.oscilloscope_device.stop_acquisition()
+                self.oscilloscope_device.set_acquisition_type("NORM")
+                self.oscilloscope_device.set_average_count(2)
+            except Exception:
+                pass
+    
     def set_chromator_wavelength(self, wavelength_nanometers):
         if self.chromator_device:
-            self.chromator_device.set_wavelength(wavelength_nanometers)
+            adjusted_wavelength = wavelength_nanometers - self.calibration_offset
+            self.chromator_device.set_wavelength(adjusted_wavelength)
             return True
         return False
     
@@ -554,105 +613,225 @@ class SpectrumMeasurement:
         if not self.oscilloscope_device:
             return False
         
-        self.test_signal_time, self.test_signal_voltage = self.oscilloscope_device.capture_waveform(
-            self.configuration.oscilloscope_signal_channel, 2000
+        self.test_signal_time, self.test_signal_voltage = self.oscilloscope_device.acquire_averaged_waveform(
+            self.configuration.oscilloscope_signal_channel,
+            self.configuration.oscilloscope_average_count,
+            2000
         )
-        if not self.test_signal_voltage:
+        
+        if not self.test_signal_voltage or len(self.test_signal_voltage) == 0:
             return False
         
-        baseline_time_values = []
-        baseline_signal_values = []
+        baseline_values = []
         for index in range(len(self.test_signal_time)):
             if self.configuration.baseline_start_time_seconds <= self.test_signal_time[index] <= self.configuration.baseline_end_time_seconds:
-                baseline_time_values.append(self.test_signal_time[index])
-                baseline_signal_values.append(self.test_signal_voltage[index])
-        if baseline_signal_values:
-            baseline_level = np.mean(baseline_signal_values)
+                baseline_values.append(self.test_signal_voltage[index])
+        
+        if baseline_values:
+            baseline_level = np.mean(baseline_values)
             self.processed_signal = [voltage - baseline_level for voltage in self.test_signal_voltage]
         else:
             self.processed_signal = self.test_signal_voltage.copy()
+        
         return True
     
-    def measure_integrated_signal(self):
+    def measure_integrated_signal(self) -> float:
         if not self.oscilloscope_device:
             return 0.0
-        time_values, voltage_values = self.oscilloscope_device.capture_waveform(
-            self.configuration.oscilloscope_signal_channel, 2000
+        
+        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform(
+            self.configuration.oscilloscope_signal_channel,
+            self.configuration.oscilloscope_average_count,
+            2000
         )
-        if not voltage_values:
+        
+        if not voltage_values or len(voltage_values) == 0:
             return 0.0
+        
         baseline_values = []
         for index in range(len(time_values)):
             if self.configuration.baseline_start_time_seconds <= time_values[index] <= self.configuration.baseline_end_time_seconds:
                 baseline_values.append(voltage_values[index])
+        
         if baseline_values:
             baseline_level = np.mean(baseline_values)
             corrected_signal = [voltage - baseline_level for voltage in voltage_values]
         else:
             corrected_signal = voltage_values.copy()
+        
         integration_time_values = []
         integration_signal_values = []
         for index in range(len(time_values)):
             if self.configuration.signal_integration_start_time_seconds <= time_values[index] <= self.configuration.signal_integration_end_time_seconds:
                 integration_time_values.append(time_values[index])
                 integration_signal_values.append(corrected_signal[index])
+        
         if len(integration_time_values) < 2:
             return 0.0
-        result = integrate_signal(integration_time_values, integration_signal_values)
-        return result
+        
+        return integrate_signal(integration_time_values, integration_signal_values)
     
-    def measure_approximated_signal(self):
+    def measure_approximated_signal(self) -> float:
         if not self.oscilloscope_device:
             return 0.0
-        time_values, voltage_values = self.oscilloscope_device.capture_waveform(
-            self.configuration.oscilloscope_signal_channel, 2000
+        
+        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform(
+            self.configuration.oscilloscope_signal_channel,
+            self.configuration.oscilloscope_average_count,
+            2000
         )
-        if not voltage_values:
+        
+        if not voltage_values or len(voltage_values) == 0:
             return 0.0
+        
         approximated_signal, fit_parameters = approximate_signal(time_values, voltage_values, use_background=True)
+        
         if fit_parameters.get("fit_successful", False):
             return fit_parameters.get("signal_amplitude_volts", 0.0)
+        
         return max(approximated_signal) if approximated_signal else 0.0
     
-    def measure_integrated_signal_2(self):
+    def measure_integrated_signal_2(self) -> float:
         if not self.oscilloscope_device:
             return 0.0
-        time_values, voltage_values = self.oscilloscope_device.capture_waveform(
-            self.configuration.oscilloscope_signal_channel, 2000
+        
+        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform(
+            self.configuration.oscilloscope_signal_channel,
+            self.configuration.oscilloscope_average_count,
+            2000
         )
-        if not voltage_values:
+        
+        if not voltage_values or len(voltage_values) == 0:
             return 0.0
+        
         baseline_values = []
         for index in range(len(time_values)):
             if self.configuration.baseline_start_time_seconds <= time_values[index] <= self.configuration.baseline_end_time_seconds:
                 baseline_values.append(voltage_values[index])
+        
         if baseline_values:
             baseline_level = np.mean(baseline_values)
             corrected_signal = [voltage - baseline_level for voltage in voltage_values]
         else:
             corrected_signal = voltage_values.copy()
+        
         integration_time_values = []
         integration_signal_values = []
         for index in range(len(time_values)):
             if self.configuration.signal_integration_start_time_seconds_2 <= time_values[index] <= self.configuration.signal_integration_end_time_seconds_2:
                 integration_time_values.append(time_values[index])
                 integration_signal_values.append(corrected_signal[index])
+        
         if len(integration_time_values) < 2:
             return 0.0
+        
         return integrate_signal(integration_time_values, integration_signal_values)
     
-    def measure_approximated_signal_2(self):
+    def measure_approximated_signal_2(self) -> float:
         if not self.oscilloscope_device:
             return 0.0
-        time_values, voltage_values = self.oscilloscope_device.capture_waveform(
-            self.configuration.oscilloscope_signal_channel, 2000
+        
+        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform(
+            self.configuration.oscilloscope_signal_channel,
+            self.configuration.oscilloscope_average_count,
+            2000
         )
-        if not voltage_values:
+        
+        if not voltage_values or len(voltage_values) == 0:
             return 0.0
+        
         approximated_signal, fit_parameters = approximate_signal(time_values, voltage_values, use_background=True)
+        
         if fit_parameters.get("fit_successful", False):
             return fit_parameters.get("signal_amplitude_volts", 0.0)
+        
         return max(approximated_signal) if approximated_signal else 0.0
+    
+    def find_spectrum_peak(self, wavelengths, amplitudes):
+        if not wavelengths or not amplitudes or len(wavelengths) < 3:
+            return 0.0
+        
+        try:
+            peak_index = np.argmax(amplitudes)
+            if peak_index > 0 and peak_index < len(amplitudes) - 1:
+                peak_wavelength = wavelengths[peak_index]
+                return peak_wavelength
+            return 0.0
+        except Exception:
+            return 0.0
+    
+    def perform_calibration(self, reference_peak):
+        if not self.wavelengths_for_spectrum or not self.integrated_values:
+            return 0.0, False
+        
+        measured_peak = self.find_spectrum_peak(self.wavelengths_for_spectrum, self.integrated_values)
+        
+        if measured_peak <= 0:
+            return 0.0, False
+        
+        calibration_offset = measured_peak - reference_peak
+        
+        self.calibration_offset = calibration_offset
+        self.calibration_performed = True
+        
+        return calibration_offset, True
+    
+    def reset_calibration(self):
+        self.calibration_offset = 0.0
+        self.calibration_performed = False
+    
+    def get_calibrated_wavelength(self, wavelength):
+        return wavelength - self.calibration_offset
+    
+    def get_applied_calibration_offset(self):
+        return self.calibration_offset
+    
+    def is_calibration_performed(self):
+        return self.calibration_performed
+    
+    def save_data_to_memory(self):
+        self.saved_spectrum_data = {
+            'wavelengths': self.wavelengths_for_spectrum.copy(),
+            'integrated_values': self.integrated_values.copy(),
+            'approximated_values': self.approximated_values.copy(),
+            'integrated_values_2': self.integrated_values_2.copy(),
+            'approximated_values_2': self.approximated_values_2.copy()
+        }
+        self.saved_energy_data = {
+            'energy_values': self.energy_values.copy(),
+            'integrated_values': self.integrated_values.copy(),
+            'approximated_values': self.approximated_values.copy(),
+            'integrated_values_2': self.integrated_values_2.copy(),
+            'approximated_values_2': self.approximated_values_2.copy()
+        }
+        self.saved_signal_data = {
+            'time_values': self.test_signal_time.copy(),
+            'voltage_values': self.processed_signal.copy()
+        }
+        self.saved_parameters = {
+            'laser_wavelength': self.configuration.laser_wavelength_nanometers,
+            'start_wavelength': self.configuration.start_wavelength_nanometers,
+            'end_wavelength': self.configuration.end_wavelength_nanometers,
+            'wavelength_step': self.configuration.wavelength_step_nanometers,
+            'input_slit': self.configuration.input_slit_micrometers,
+            'output_slit': self.configuration.output_slit_micrometers,
+            'oscilloscope_channel': self.configuration.oscilloscope_signal_channel,
+            'average_count': self.configuration.oscilloscope_average_count,
+            'dual_integration': self.configuration.dual_integration_enabled,
+            'reference_peak': self.configuration.reference_peak_nanometers,
+            'calibration_offset': self.calibration_offset,
+            'calibration_performed': self.calibration_performed
+        }
+        self.saved_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    def get_saved_data(self):
+        return {
+            'spectrum': self.saved_spectrum_data,
+            'energy': self.saved_energy_data,
+            'signal_data': self.saved_signal_data,
+            'parameters': self.saved_parameters,
+            'timestamp': self.saved_timestamp
+        }
     
     def scan_spectrum(self, progress_callback):
         self.stop_requested = False
@@ -668,16 +847,26 @@ class SpectrumMeasurement:
         self.approximated_values_2 = []
         self.wavelengths_for_spectrum = []
         
-        if self.chromator_device:
-            self.chromator_device.set_acquisition_type("AVER")
-            self.chromator_device.set_average_count(self.configuration.oscilloscope_average_count)
+        if self.oscilloscope_device:
+            try:
+                self.oscilloscope_device.set_acquisition_type("AVER")
+                self.oscilloscope_device.set_average_count(self.configuration.oscilloscope_average_count)
+                
+                if self.configuration.oscilloscope_average_count > 256:
+                    time.sleep(min(self.configuration.oscilloscope_average_count / 20, 30.0))
+            except Exception:
+                pass
         
         for point_index, wavelength in enumerate(wavelength_list):
             if self.stop_requested:
                 break
             
             self.set_chromator_wavelength(wavelength)
-            time.sleep(0.3)
+            
+            if hasattr(self.chromator_device, 'wait_for_wavelength_stable'):
+                self.chromator_device.wait_for_wavelength_stable(wavelength, 0.1, 10.0)
+            else:
+                time.sleep(0.3)
             
             integrated_value = self.measure_integrated_signal()
             approximated_value = self.measure_approximated_signal()
@@ -695,6 +884,9 @@ class SpectrumMeasurement:
             completion_percent = int((point_index + 1) / total_points * 100)
             progress_callback(completion_percent)
         
+        self.restore_oscilloscope_settings()
+        self.save_data_to_memory()
+        
         return len(self.wavelengths_for_spectrum) > 0
     
     def measure_energy_series(self, points_count, progress_callback):
@@ -704,6 +896,16 @@ class SpectrumMeasurement:
         self.approximated_values = []
         self.integrated_values_2 = []
         self.approximated_values_2 = []
+        
+        if self.oscilloscope_device:
+            try:
+                self.oscilloscope_device.set_acquisition_type("AVER")
+                self.oscilloscope_device.set_average_count(self.configuration.oscilloscope_average_count)
+                
+                if self.configuration.oscilloscope_average_count > 256:
+                    time.sleep(min(self.configuration.oscilloscope_average_count / 20, 30.0))
+            except Exception:
+                pass
         
         for point_index in range(points_count):
             if self.stop_requested:
@@ -726,6 +928,9 @@ class SpectrumMeasurement:
             progress_callback(completion_percent)
             
             time.sleep(0.1)
+        
+        self.restore_oscilloscope_settings()
+        self.save_data_to_memory()
         
         return len(self.energy_values) > 0
 
@@ -810,128 +1015,22 @@ class MainApplicationWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint)
+        self.resize(1200, 800)
         self.settings = SettingsManager()
         self.measurement = SpectrumMeasurement()
-        self.current_language = self.settings.get('language', 'ru')
-        self.current_theme = self.settings.get('theme', 'light')
         self.is_connected = False
         self.is_running = False
-        self.translations = self.get_translations()
+        self.dragging = False
+        self.drag_position = None
         
         icon_path = Path(sys.executable).parent / "icon.png" if getattr(sys, "frozen", False) else Path(__file__).parent / "icon.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
         
         self.setup_user_interface()
-        self.apply_theme(self.current_theme)
-        self.update_language(self.current_language)
+        self.apply_theme()
         
         self.worker_thread = None
-    
-    def get_translations(self):
-        return {
-            'ru': {
-                'window_title': 'Измерение спектров',
-                'tab_params': 'Параметры',
-                'tab_signal': 'Сигнал',
-                'tab_spectrum': 'Спектр',
-                'tab_energy': 'Энергия',
-                'language': 'Язык:',
-                'theme': 'Тема:',
-                'russian': 'Русский',
-                'english': 'English',
-                'light': 'Светлая',
-                'dark': 'Тёмная',
-                'connect': 'Подключить',
-                'disconnect': 'Отключить',
-                'start': 'Начать',
-                'stop': 'Остановить',
-                'reset': 'Сбросить',
-                'params_group': 'Параметры измерения',
-                'laser_wavelength': 'Длина волны лазера (нм):',
-                'start_wavelength': 'Начальная длина волны (нм):',
-                'end_wavelength': 'Конечная длина волны (нм):',
-                'scan_step': 'Шаг сканирования (нм):',
-                'input_slit': 'Входная щель (мкм):',
-                'output_slit': 'Выходная щель (мкм):',
-                'osc_channel': 'Канал осциллографа:',
-                'osc_averaging': 'Усреднение осциллографа:',
-                'power_averaging': 'Усреднение измерителя энергии:',
-                'dual_integration': 'Дополнительные границы интегрирования',
-                'energy_points': 'Количество точек энергии:',
-                'control_group': 'Управление',
-                'progress_group': 'Прогресс',
-                'signal_control': 'Управление сигналом',
-                'wavelength': 'Длина волны (нм):',
-                'capture': 'Захватить сигнал',
-                'integration_bounds': 'Границы интегрирования',
-                'bg_left': 'Фон (левая):',
-                'bg_right': 'Фон (правая):',
-                'sig1_left': 'Сигнал 1 (левая):',
-                'sig1_right': 'Сигнал 1 (правая):',
-                'sig2_left': 'Сигнал 2 (левая):',
-                'sig2_right': 'Сигнал 2 (правая):',
-                'update_bounds': 'Обновить границы',
-                'save_graph': 'Сохранить график',
-                'save_data': 'Сохранить данные',
-                'connection_error': 'Не удалось подключить оборудование!\nПроверьте соединения!',
-                'connection_error_title': 'Ошибка подключения',
-                'integration': 'Интегрирование',
-                'approximation': 'Аппроксимация',
-            },
-            'en': {
-                'window_title': 'Spectrum Measurement',
-                'tab_params': 'Parameters',
-                'tab_signal': 'Signal',
-                'tab_spectrum': 'Spectrum',
-                'tab_energy': 'Energy',
-                'language': 'Language:',
-                'theme': 'Theme:',
-                'russian': 'Russian',
-                'english': 'English',
-                'light': 'Light',
-                'dark': 'Dark',
-                'connect': 'Connect',
-                'disconnect': 'Disconnect',
-                'start': 'Start',
-                'stop': 'Stop',
-                'reset': 'Reset',
-                'params_group': 'Measurement Parameters',
-                'laser_wavelength': 'Laser wavelength (nm):',
-                'start_wavelength': 'Start wavelength (nm):',
-                'end_wavelength': 'End wavelength (nm):',
-                'scan_step': 'Scan step (nm):',
-                'input_slit': 'Input slit (µm):',
-                'output_slit': 'Output slit (µm):',
-                'osc_channel': 'Oscilloscope channel:',
-                'osc_averaging': 'Oscilloscope averaging:',
-                'power_averaging': 'Power meter averaging:',
-                'dual_integration': 'Additional integration bounds',
-                'energy_points': 'Energy points count:',
-                'control_group': 'Control',
-                'progress_group': 'Progress',
-                'signal_control': 'Signal Control',
-                'wavelength': 'Wavelength (nm):',
-                'capture': 'Capture signal',
-                'integration_bounds': 'Integration bounds',
-                'bg_left': 'Background (left):',
-                'bg_right': 'Background (right):',
-                'sig1_left': 'Signal 1 (left):',
-                'sig1_right': 'Signal 1 (right):',
-                'sig2_left': 'Signal 2 (left):',
-                'sig2_right': 'Signal 2 (right):',
-                'update_bounds': 'Update bounds',
-                'save_graph': 'Save graph',
-                'save_data': 'Save data',
-                'connection_error': 'Failed to connect equipment!\nCheck connections!',
-                'connection_error_title': 'Connection Error',
-                'integration': 'Integration',
-                'approximation': 'Approximation',
-            }
-        }
-    
-    def tr(self, text):
-        return self.translations.get(self.current_language, {}).get(text, text)
     
     def setup_user_interface(self):
         self.title_bar = CustomTitleBar(self)
@@ -949,64 +1048,22 @@ class MainApplicationWindow(QMainWindow):
         content_layout.setContentsMargins(5, 5, 5, 5)
         content_layout.setSpacing(5)
         
-        toolbar = self.create_toolbar()
-        content_layout.addWidget(toolbar)
-        
         self.tab_widget = QTabWidget()
         content_layout.addWidget(self.tab_widget)
         
         self.parameters_tab = self.create_parameters_tab()
-        self.tab_widget.addTab(self.parameters_tab, self.tr('tab_params'))
+        self.tab_widget.addTab(self.parameters_tab, "Параметры")
         
         self.signal_tab = self.create_signal_tab()
-        self.tab_widget.addTab(self.signal_tab, self.tr('tab_signal'))
+        self.tab_widget.addTab(self.signal_tab, "Сигнал")
         
         self.spectrum_tab = self.create_spectrum_tab()
-        self.tab_widget.addTab(self.spectrum_tab, self.tr('tab_spectrum'))
+        self.tab_widget.addTab(self.spectrum_tab, "Спектр")
         
         self.energy_tab = self.create_energy_tab()
-        self.tab_widget.addTab(self.energy_tab, self.tr('tab_energy'))
+        self.tab_widget.addTab(self.energy_tab, "Энергия")
         
         main_layout.addWidget(content_widget)
-    
-    def create_toolbar(self):
-        toolbar_widget = QWidget()
-        toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(5, 2, 5, 2)
-        toolbar_layout.setSpacing(10)
-        
-        self.language_label = QLabel(self.tr('language'))
-        toolbar_layout.addWidget(self.language_label)
-        
-        self.language_combo = QComboBox()
-        self.language_combo.addItems([self.tr('russian'), self.tr('english')])
-        self.language_combo.setCurrentIndex(0 if self.current_language == 'ru' else 1)
-        self.language_combo.currentIndexChanged.connect(self.on_language_changed)
-        self.language_combo.setFixedWidth(100)
-        toolbar_layout.addWidget(self.language_combo)
-        
-        toolbar_layout.addSpacing(10)
-        
-        self.theme_label = QLabel(self.tr('theme'))
-        toolbar_layout.addWidget(self.theme_label)
-        
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems([self.tr('light'), self.tr('dark')])
-        self.theme_combo.setCurrentIndex(0 if self.current_theme == 'light' else 1)
-        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
-        self.theme_combo.setFixedWidth(100)
-        toolbar_layout.addWidget(self.theme_combo)
-        
-        toolbar_layout.addSpacing(10)
-        
-        self.connect_button = QPushButton(self.tr('connect'))
-        self.connect_button.clicked.connect(self.toggle_connection)
-        self.connect_button.setFixedWidth(100)
-        toolbar_layout.addWidget(self.connect_button)
-        
-        toolbar_layout.addStretch()
-        
-        return toolbar_widget
     
     def create_parameters_tab(self):
         tab = QWidget()
@@ -1020,67 +1077,135 @@ class MainApplicationWindow(QMainWindow):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addStretch()
         
-        params_group = QGroupBox(self.tr('params_group'))
+        # ★ ГРУППА ПОДКЛЮЧЕНИЯ И КАЛИБРОВКИ ★
+        connection_group = QGroupBox("Подключение и калибровка")
+        connection_group.setFixedWidth(450)
+        connection_layout = QHBoxLayout(connection_group)
+        connection_layout.setSpacing(10)
+        connection_layout.setContentsMargins(20, 10, 20, 10)
+        
+        self.connect_button = QPushButton("Подключить")
+        self.connect_button.clicked.connect(self.toggle_connection)
+        self.connect_button.setFixedWidth(120)
+        connection_layout.addStretch()
+        connection_layout.addWidget(self.connect_button)
+        
+        self.calibration_button = QPushButton("Калибровка")
+        self.calibration_button.clicked.connect(self.perform_calibration)
+        self.calibration_button.setEnabled(False)
+        self.calibration_button.setFixedWidth(120)
+        connection_layout.addWidget(self.calibration_button)
+        
+        self.calibration_reset_button = QPushButton("Сброс")
+        self.calibration_reset_button.clicked.connect(self.reset_calibration)
+        self.calibration_reset_button.setEnabled(False)
+        self.calibration_reset_button.setFixedWidth(120)
+        connection_layout.addWidget(self.calibration_reset_button)
+        connection_layout.addStretch()
+        
+        outer_layout.addWidget(CenteredWidget(connection_group, outer_widget))
+        
+        params_group = QGroupBox("Параметры измерения")
+        params_group.setFixedWidth(450)
+        params_group.setMinimumHeight(400)
         params_layout = QVBoxLayout(params_group)
         params_layout.setSpacing(5)
         params_layout.setContentsMargins(20, 15, 20, 15)
         
         self.laser_wavelength_edit = QLineEdit(str(self.settings.get('laser_wavelength', 1064.0)))
-        params_layout.addWidget(FieldRow(self.tr('laser_wavelength'), self.laser_wavelength_edit))
+        params_layout.addWidget(FieldRow("Длина волны лазера (нм):", self.laser_wavelength_edit))
         
         self.start_wavelength_edit = QLineEdit(str(self.settings.get('start_wavelength', 1300.0)))
-        params_layout.addWidget(FieldRow(self.tr('start_wavelength'), self.start_wavelength_edit))
+        params_layout.addWidget(FieldRow("Начальная длина волны (нм):", self.start_wavelength_edit))
         
         self.end_wavelength_edit = QLineEdit(str(self.settings.get('end_wavelength', 1400.0)))
-        params_layout.addWidget(FieldRow(self.tr('end_wavelength'), self.end_wavelength_edit))
+        params_layout.addWidget(FieldRow("Конечная длина волны (нм):", self.end_wavelength_edit))
         
         self.wavelength_step_edit = QLineEdit(str(self.settings.get('wavelength_step', 0.5)))
-        params_layout.addWidget(FieldRow(self.tr('scan_step'), self.wavelength_step_edit))
+        params_layout.addWidget(FieldRow("Шаг сканирования (нм):", self.wavelength_step_edit))
         
         self.input_slit_edit = QLineEdit(str(self.settings.get('input_slit', 100.0)))
-        params_layout.addWidget(FieldRow(self.tr('input_slit'), self.input_slit_edit))
+        params_layout.addWidget(FieldRow("Входная щель (мкм):", self.input_slit_edit))
         
         self.output_slit_edit = QLineEdit(str(self.settings.get('output_slit', 100.0)))
-        params_layout.addWidget(FieldRow(self.tr('output_slit'), self.output_slit_edit))
+        params_layout.addWidget(FieldRow("Выходная щель (мкм):", self.output_slit_edit))
         
         self.oscilloscope_channel_edit = QLineEdit(str(self.settings.get('oscilloscope_channel', 1)))
-        params_layout.addWidget(FieldRow(self.tr('osc_channel'), self.oscilloscope_channel_edit))
+        params_layout.addWidget(FieldRow("Канал осциллографа:", self.oscilloscope_channel_edit))
         
         self.average_count_edit = QLineEdit(str(self.settings.get('average_count', 1024)))
-        params_layout.addWidget(FieldRow(self.tr('osc_averaging'), self.average_count_edit))
+        params_layout.addWidget(FieldRow("Усреднение осциллографа:", self.average_count_edit))
         
         self.power_average_edit = QLineEdit(str(self.settings.get('power_average_count', 10)))
-        params_layout.addWidget(FieldRow(self.tr('power_averaging'), self.power_average_edit))
+        params_layout.addWidget(FieldRow("Усреднение измерителя энергии:", self.power_average_edit))
         
         self.energy_points_edit = QLineEdit(str(self.settings.get('energy_points', 10)))
-        params_layout.addWidget(FieldRow(self.tr('energy_points'), self.energy_points_edit))
+        params_layout.addWidget(FieldRow("Количество точек энергии:", self.energy_points_edit))
         
-        self.dual_integration_checkbox = QCheckBox(self.tr('dual_integration'))
+        self.reference_peak_edit = QLineEdit(str(self.settings.get('reference_peak', 1308.0)))
+        params_layout.addWidget(FieldRow("Эталонный пик (нм):", self.reference_peak_edit))
+        
+        self.dual_integration_checkbox = QCheckBox("Дополнительные границы интегрирования")
         self.dual_integration_checkbox.setChecked(self.settings.get('dual_integration', False))
         self.dual_integration_checkbox.toggled.connect(self.on_dual_integration_toggled)
         params_layout.addWidget(CheckBoxRow(self.dual_integration_checkbox))
         
+        status_layout = QHBoxLayout()
+        status_layout.setSpacing(10)
+        status_layout.setContentsMargins(20, 5, 20, 5)
+        
+        calibration_status_label = QLabel("Калибровка:")
+        calibration_status_label.setMinimumWidth(180)
+        calibration_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        status_layout.addWidget(calibration_status_label)
+        
+        self.calibration_status_value = QLabel("Не выполнена")
+        self.calibration_status_value.setMinimumWidth(150)
+        self.calibration_status_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.calibration_status_value.setStyleSheet("color: #888;")
+        status_layout.addWidget(self.calibration_status_value)
+        
+        status_layout.addStretch()
+        params_layout.addLayout(status_layout)
+        
+        offset_layout = QHBoxLayout()
+        offset_layout.setSpacing(10)
+        offset_layout.setContentsMargins(20, 0, 20, 5)
+        
+        calibration_offset_label = QLabel("Смещение:")
+        calibration_offset_label.setMinimumWidth(180)
+        calibration_offset_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        offset_layout.addWidget(calibration_offset_label)
+        
+        self.calibration_offset_value = QLabel("0.00 нм")
+        self.calibration_offset_value.setMinimumWidth(150)
+        self.calibration_offset_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        offset_layout.addWidget(self.calibration_offset_value)
+        
+        offset_layout.addStretch()
+        params_layout.addLayout(offset_layout)
+        
         outer_layout.addWidget(CenteredWidget(params_group, outer_widget))
         
-        control_group = QGroupBox(self.tr('control_group'))
+        control_group = QGroupBox("Управление экспериментом")
         control_layout = QHBoxLayout(control_group)
         control_layout.setSpacing(10)
         control_layout.setContentsMargins(20, 10, 20, 10)
         
-        self.start_button = QPushButton(self.tr('start'))
+        self.start_button = QPushButton("Начать")
         self.start_button.clicked.connect(self.start_experiment)
         self.start_button.setEnabled(False)
         self.start_button.setFixedWidth(120)
         control_layout.addStretch()
         control_layout.addWidget(self.start_button)
         
-        self.stop_button = QPushButton(self.tr('stop'))
+        self.stop_button = QPushButton("Остановить")
         self.stop_button.clicked.connect(self.stop_experiment)
         self.stop_button.setEnabled(False)
         self.stop_button.setFixedWidth(120)
         control_layout.addWidget(self.stop_button)
         
-        self.reset_button = QPushButton(self.tr('reset'))
+        self.reset_button = QPushButton("Сбросить")
         self.reset_button.clicked.connect(self.reset_parameters)
         self.reset_button.setFixedWidth(120)
         control_layout.addWidget(self.reset_button)
@@ -1088,7 +1213,7 @@ class MainApplicationWindow(QMainWindow):
         
         outer_layout.addWidget(CenteredWidget(control_group, outer_widget))
         
-        progress_group = QGroupBox(self.tr('progress_group'))
+        progress_group = QGroupBox("Прогресс")
         progress_layout = QVBoxLayout(progress_group)
         progress_layout.setContentsMargins(20, 10, 20, 10)
         self.progress_bar = QProgressBar()
@@ -1112,21 +1237,23 @@ class MainApplicationWindow(QMainWindow):
         top_layout = QHBoxLayout(top_widget)
         top_layout.setSpacing(10)
         
-        control_group = QGroupBox(self.tr('signal_control'))
+        control_group = QGroupBox("Управление сигналом")
+        control_group.setFixedWidth(450)
+        control_group.setMinimumHeight(150)
         control_layout = QVBoxLayout(control_group)
         control_layout.setSpacing(5)
         control_layout.setContentsMargins(15, 10, 15, 10)
         
         self.signal_wavelength_edit = QLineEdit(str(self.settings.get('start_wavelength', 1300.0)))
-        control_layout.addWidget(FieldRow(self.tr('wavelength'), self.signal_wavelength_edit))
+        control_layout.addWidget(FieldRow("Длина волны (нм):", self.signal_wavelength_edit))
         
         self.signal_input_slit_edit = QLineEdit(str(self.settings.get('input_slit', 100.0)))
-        control_layout.addWidget(FieldRow(self.tr('input_slit'), self.signal_input_slit_edit))
+        control_layout.addWidget(FieldRow("Входная щель (мкм):", self.signal_input_slit_edit))
         
         self.signal_output_slit_edit = QLineEdit(str(self.settings.get('output_slit', 100.0)))
-        control_layout.addWidget(FieldRow(self.tr('output_slit'), self.signal_output_slit_edit))
+        control_layout.addWidget(FieldRow("Выходная щель (мкм):", self.signal_output_slit_edit))
         
-        self.capture_button = QPushButton(self.tr('capture'))
+        self.capture_button = QPushButton("Захватить сигнал")
         self.capture_button.clicked.connect(self.capture_signal)
         self.capture_button.setEnabled(False)
         self.capture_button.setFixedWidth(150)
@@ -1134,7 +1261,9 @@ class MainApplicationWindow(QMainWindow):
         
         top_layout.addWidget(CenteredWidget(control_group, top_widget))
         
-        integration_group = QGroupBox(self.tr('integration_bounds'))
+        integration_group = QGroupBox("Границы интегрирования")
+        integration_group.setFixedWidth(800)
+        integration_group.setMinimumHeight(150)
         integration_layout = QVBoxLayout(integration_group)
         integration_layout.setSpacing(5)
         integration_layout.setContentsMargins(15, 10, 15, 10)
@@ -1142,27 +1271,27 @@ class MainApplicationWindow(QMainWindow):
         self.baseline_start_edit = QLineEdit(str(self.settings.get('baseline_start', -10e-6)))
         self.baseline_end_edit = QLineEdit(str(self.settings.get('baseline_end', -2e-6)))
         integration_layout.addWidget(DoubleFieldRow(
-            self.tr('bg_left'), self.baseline_start_edit,
-            self.tr('bg_right'), self.baseline_end_edit
+            "Фон (левая):", self.baseline_start_edit,
+            "Фон (правая):", self.baseline_end_edit
         ))
         
         self.signal1_start_edit = QLineEdit(str(self.settings.get('signal1_start', -2e-6)))
         self.signal1_end_edit = QLineEdit(str(self.settings.get('signal1_end', 20e-6)))
         integration_layout.addWidget(DoubleFieldRow(
-            self.tr('sig1_left'), self.signal1_start_edit,
-            self.tr('sig1_right'), self.signal1_end_edit
+            "Сигнал 1 (левая):", self.signal1_start_edit,
+            "Сигнал 1 (правая):", self.signal1_end_edit
         ))
         
         self.signal2_start_edit = QLineEdit(str(self.settings.get('signal2_start', 10e-6)))
         self.signal2_end_edit = QLineEdit(str(self.settings.get('signal2_end', 30e-6)))
         self.signal2_row = DoubleFieldRow(
-            self.tr('sig2_left'), self.signal2_start_edit,
-            self.tr('sig2_right'), self.signal2_end_edit
+            "Сигнал 2 (левая):", self.signal2_start_edit,
+            "Сигнал 2 (правая):", self.signal2_end_edit
         )
         self.signal2_row.setVisible(self.settings.get('dual_integration', False))
         integration_layout.addWidget(self.signal2_row)
         
-        self.update_bounds_button = QPushButton(self.tr('update_bounds'))
+        self.update_bounds_button = QPushButton("Обновить границы")
         self.update_bounds_button.clicked.connect(self.update_integration_bounds)
         self.update_bounds_button.setFixedWidth(150)
         integration_layout.addWidget(ButtonRow(self.update_bounds_button))
@@ -1186,13 +1315,13 @@ class MainApplicationWindow(QMainWindow):
         
         control_layout.addStretch()
         
-        self.save_spectrum_graph_button = QPushButton(self.tr('save_graph'))
+        self.save_spectrum_graph_button = QPushButton("Сохранить график")
         self.save_spectrum_graph_button.clicked.connect(lambda: self.save_graph_as_png(self.spectrum_plot))
         self.save_spectrum_graph_button.setFixedWidth(150)
         control_layout.addWidget(self.save_spectrum_graph_button)
         
-        self.save_spectrum_data_button = QPushButton(self.tr('save_data'))
-        self.save_spectrum_data_button.clicked.connect(self.save_spectrum_to_file)
+        self.save_spectrum_data_button = QPushButton("Сохранить данные")
+        self.save_spectrum_data_button.clicked.connect(self.export_spectrum_to_file)
         self.save_spectrum_data_button.setFixedWidth(150)
         control_layout.addWidget(self.save_spectrum_data_button)
         
@@ -1214,13 +1343,13 @@ class MainApplicationWindow(QMainWindow):
         
         control_layout.addStretch()
         
-        self.save_energy_graph_button = QPushButton(self.tr('save_graph'))
+        self.save_energy_graph_button = QPushButton("Сохранить график")
         self.save_energy_graph_button.clicked.connect(lambda: self.save_graph_as_png(self.energy_plot))
         self.save_energy_graph_button.setFixedWidth(150)
         control_layout.addWidget(self.save_energy_graph_button)
         
-        self.save_energy_data_button = QPushButton(self.tr('save_data'))
-        self.save_energy_data_button.clicked.connect(self.save_energy_to_file)
+        self.save_energy_data_button = QPushButton("Сохранить данные")
+        self.save_energy_data_button.clicked.connect(self.export_energy_to_file)
         self.save_energy_data_button.setFixedWidth(150)
         control_layout.addWidget(self.save_energy_data_button)
         
@@ -1232,199 +1361,32 @@ class MainApplicationWindow(QMainWindow):
         
         return tab
     
-    def on_language_changed(self, index):
-        language = 'ru' if index == 0 else 'en'
-        self.current_language = language
-        self.settings.set('language', language)
-        self.update_language(language)
-    
-    def update_language(self, language):
-        self.title_bar.title_label.setText(self.tr('window_title'))
-        self.setWindowTitle(self.tr('window_title'))
-        
-        self.tab_widget.setTabText(0, self.tr('tab_params'))
-        self.tab_widget.setTabText(1, self.tr('tab_signal'))
-        self.tab_widget.setTabText(2, self.tr('tab_spectrum'))
-        self.tab_widget.setTabText(3, self.tr('tab_energy'))
-        
-        self.language_label.setText(self.tr('language'))
-        self.theme_label.setText(self.tr('theme'))
-        
-        self.language_combo.blockSignals(True)
-        self.language_combo.clear()
-        self.language_combo.addItems([self.tr('russian'), self.tr('english')])
-        self.language_combo.setCurrentIndex(0 if language == 'ru' else 1)
-        self.language_combo.blockSignals(False)
-        
-        self.theme_combo.blockSignals(True)
-        self.theme_combo.clear()
-        self.theme_combo.addItems([self.tr('light'), self.tr('dark')])
-        self.theme_combo.setCurrentIndex(0 if self.current_theme == 'light' else 1)
-        self.theme_combo.blockSignals(False)
-        
-        self.connect_button.setText(self.tr('disconnect' if self.is_connected else 'connect'))
-        self.start_button.setText(self.tr('start'))
-        self.stop_button.setText(self.tr('stop'))
-        self.reset_button.setText(self.tr('reset'))
-        self.capture_button.setText(self.tr('capture'))
-        self.update_bounds_button.setText(self.tr('update_bounds'))
-        self.save_spectrum_graph_button.setText(self.tr('save_graph'))
-        self.save_spectrum_data_button.setText(self.tr('save_data'))
-        self.save_energy_graph_button.setText(self.tr('save_graph'))
-        self.save_energy_data_button.setText(self.tr('save_data'))
-        
-        self.update_tab_texts()
-    
-    def update_tab_texts(self):
-        for child in self.parameters_tab.findChildren(QGroupBox):
-            title = child.title()
-            if title in ['Параметры измерения', 'Measurement Parameters']:
-                child.setTitle(self.tr('params_group'))
-            elif title in ['Управление', 'Control']:
-                child.setTitle(self.tr('control_group'))
-            elif title in ['Прогресс', 'Progress']:
-                child.setTitle(self.tr('progress_group'))
-        
-        for child in self.signal_tab.findChildren(QGroupBox):
-            title = child.title()
-            if title in ['Управление сигналом', 'Signal Control']:
-                child.setTitle(self.tr('signal_control'))
-            elif title in ['Границы интегрирования', 'Integration bounds']:
-                child.setTitle(self.tr('integration_bounds'))
-        
-        self.dual_integration_checkbox.setText(self.tr('dual_integration'))
-        
-        for widget in self.signal_tab.findChildren(DoubleFieldRow):
-            if hasattr(widget, 'label_left') and widget.label_left:
-                if 'Фон (левая):' in widget.label_left.text() or 'Background (left):' in widget.label_left.text():
-                    widget.label_left.setText(self.tr('bg_left'))
-                elif 'Сигнал 1 (левая):' in widget.label_left.text() or 'Signal 1 (left):' in widget.label_left.text():
-                    widget.label_left.setText(self.tr('sig1_left'))
-                elif 'Сигнал 2 (левая):' in widget.label_left.text() or 'Signal 2 (left):' in widget.label_left.text():
-                    widget.label_left.setText(self.tr('sig2_left'))
-            
-            if hasattr(widget, 'label_right') and widget.label_right:
-                if 'Фон (правая):' in widget.label_right.text() or 'Background (right):' in widget.label_right.text():
-                    widget.label_right.setText(self.tr('bg_right'))
-                elif 'Сигнал 1 (правая):' in widget.label_right.text() or 'Signal 1 (right):' in widget.label_right.text():
-                    widget.label_right.setText(self.tr('sig1_right'))
-                elif 'Сигнал 2 (правая):' in widget.label_right.text() or 'Signal 2 (right):' in widget.label_right.text():
-                    widget.label_right.setText(self.tr('sig2_right'))
-        
-        for widget in self.signal_tab.findChildren(FieldRow):
-            if hasattr(widget, 'label') and widget.label:
-                if 'Длина волны (нм):' in widget.label.text() or 'Wavelength (nm):' in widget.label.text():
-                    widget.label.setText(self.tr('wavelength'))
-                elif 'Входная щель (мкм):' in widget.label.text() or 'Input slit (µm):' in widget.label.text():
-                    widget.label.setText(self.tr('input_slit'))
-                elif 'Выходная щель (мкм):' in widget.label.text() or 'Output slit (µm):' in widget.label.text():
-                    widget.label.setText(self.tr('output_slit'))
-        
-        for widget in self.parameters_tab.findChildren(FieldRow):
-            if hasattr(widget, 'label') and widget.label:
-                text = widget.label.text()
-                if 'Длина волны лазера (нм):' in text or 'Laser wavelength (nm):' in text:
-                    widget.label.setText(self.tr('laser_wavelength'))
-                elif 'Начальная длина волны (нм):' in text or 'Start wavelength (nm):' in text:
-                    widget.label.setText(self.tr('start_wavelength'))
-                elif 'Конечная длина волны (нм):' in text or 'End wavelength (nm):' in text:
-                    widget.label.setText(self.tr('end_wavelength'))
-                elif 'Шаг сканирования (нм):' in text or 'Scan step (nm):' in text:
-                    widget.label.setText(self.tr('scan_step'))
-                elif 'Входная щель (мкм):' in text or 'Input slit (µm):' in text:
-                    widget.label.setText(self.tr('input_slit'))
-                elif 'Выходная щель (мкм):' in text or 'Output slit (µm):' in text:
-                    widget.label.setText(self.tr('output_slit'))
-                elif 'Канал осциллографа:' in text or 'Oscilloscope channel:' in text:
-                    widget.label.setText(self.tr('osc_channel'))
-                elif 'Усреднение осциллографа:' in text or 'Oscilloscope averaging:' in text:
-                    widget.label.setText(self.tr('osc_averaging'))
-                elif 'Усреднение измерителя энергии:' in text or 'Power meter averaging:' in text:
-                    widget.label.setText(self.tr('power_averaging'))
-                elif 'Количество точек энергии:' in text or 'Energy points count:' in text:
-                    widget.label.setText(self.tr('energy_points'))
-    
-    def on_theme_changed(self, index):
-        theme = 'light' if index == 0 else 'dark'
-        self.current_theme = theme
-        self.settings.set('theme', theme)
-        self.apply_theme(theme)
-    
-    def apply_theme(self, theme):
+    def apply_theme(self):
         self.title_bar.update_style()
-        
-        if theme == 'dark':
-            dark_palette = QPalette()
-            dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
-            dark_palette.setColor(QPalette.WindowText, Qt.white)
-            dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
-            dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-            dark_palette.setColor(QPalette.ToolTipBase, Qt.white)
-            dark_palette.setColor(QPalette.ToolTipText, Qt.white)
-            dark_palette.setColor(QPalette.Text, Qt.white)
-            dark_palette.setColor(QPalette.Button, QColor(53, 53, 53))
-            dark_palette.setColor(QPalette.ButtonText, Qt.white)
-            dark_palette.setColor(QPalette.BrightText, Qt.red)
-            dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
-            dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-            dark_palette.setColor(QPalette.HighlightedText, Qt.black)
-            self.setPalette(dark_palette)
-            
-            self.setStyleSheet("""
-                QMainWindow { background-color: #353535; }
-                QWidget { background-color: #353535; }
-                QToolBar { background-color: #353535; border: none; }
-                QToolBar QLabel { color: white; }
-                QTabWidget::pane { background-color: #353535; border: 1px solid #555; }
-                QTabBar::tab { background-color: #353535; color: white; padding: 6px 12px; }
-                QTabBar::tab:selected { background-color: #2d2d2d; border-bottom: 2px solid #42a5f5; }
-                QTabBar::tab:hover { background-color: #454545; }
-                QGroupBox { color: white; border: 1px solid #555; margin-top: 10px; padding-top: 8px; background-color: #353535; }
-                QGroupBox::title { color: white; subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-                QLabel { color: white; }
-                QLineEdit { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px; border-radius: 2px; }
-                QLineEdit:focus { border: 1px solid #42a5f5; }
-                QPushButton { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 5px 10px; border-radius: 3px; }
-                QPushButton:hover { background-color: #3d3d3d; border: 1px solid #666; }
-                QPushButton:pressed { background-color: #1d1d1d; }
-                QPushButton:disabled { color: #666; background-color: #1d1d1d; }
-                QCheckBox { color: white; }
-                QCheckBox::indicator { width: 16px; height: 16px; }
-                QProgressBar { background-color: #2d2d2d; border: 1px solid #555; border-radius: 3px; text-align: center; color: white; }
-                QProgressBar::chunk { background-color: #42a5f5; border-radius: 3px; }
-                QComboBox { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px; border-radius: 2px; }
-                QComboBox:hover { background-color: #3d3d3d; border: 1px solid #666; }
-                QComboBox::drop-down { border: none; }
-                QComboBox::down-arrow { image: none; border-left: 1px solid #555; padding: 2px; }
-                QComboBox QAbstractItemView { background-color: #2d2d2d; color: white; selection-background-color: #42a5f5; border: 1px solid #555; }
-                QComboBox QAbstractItemView::item:hover { background-color: #3d3d3d; }
-                QChartView { background-color: #2d2d2d; }
-            """)
-        else:
-            self.setPalette(self.style().standardPalette())
-            self.setStyleSheet("""
-                QMainWindow { background-color: #f0f0f0; }
-                QWidget { background-color: #f0f0f0; }
-                QToolBar { background-color: #f0f0f0; border: none; }
-                QTabWidget::pane { border: 1px solid #ccc; background-color: #f0f0f0; }
-                QTabBar::tab { padding: 6px 12px; }
-                QTabBar::tab:selected { border-bottom: 2px solid #0078d4; }
-                QGroupBox { border: 1px solid #ccc; margin-top: 10px; padding-top: 8px; background-color: #f0f0f0; }
-                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-                QLineEdit { border: 1px solid #ccc; padding: 4px; border-radius: 2px; }
-                QLineEdit:focus { border: 1px solid #0078d4; }
-                QPushButton { border: 1px solid #ccc; padding: 5px 10px; border-radius: 3px; background-color: #f0f0f0; }
-                QPushButton:hover { background-color: #e0e0e0; }
-                QPushButton:pressed { background-color: #d0d0d0; }
-                QPushButton:disabled { color: #999; }
-                QProgressBar { border: 1px solid #ccc; border-radius: 3px; text-align: center; }
-                QProgressBar::chunk { background-color: #0078d4; border-radius: 3px; }
-                QComboBox { border: 1px solid #ccc; padding: 4px; border-radius: 2px; }
-                QComboBox:hover { border: 1px solid #999; }
-                QComboBox QAbstractItemView { selection-background-color: #0078d4; }
-                QComboBox QAbstractItemView::item:hover { background-color: #e0e0e0; }
-                QChartView { background-color: white; }
-            """)
+        self.setPalette(self.style().standardPalette())
+        self.setStyleSheet("""
+            QMainWindow { background-color: #f0f0f0; }
+            QWidget { background-color: #f0f0f0; }
+            QToolBar { background-color: #f0f0f0; border: none; }
+            QTabWidget::pane { border: 1px solid #ccc; background-color: #f0f0f0; }
+            QTabBar::tab { padding: 6px 12px; }
+            QTabBar::tab:selected { border-bottom: 2px solid #0078d4; }
+            QGroupBox { border: 1px solid #ccc; margin-top: 10px; padding-top: 8px; background-color: #f0f0f0; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+            QLineEdit { border: 1px solid #ccc; padding: 4px; border-radius: 2px; }
+            QLineEdit:focus { border: 1px solid #0078d4; }
+            QPushButton { border: 1px solid #ccc; padding: 5px 10px; border-radius: 3px; background-color: #f0f0f0; }
+            QPushButton:hover { background-color: #e0e0e0; }
+            QPushButton:pressed { background-color: #d0d0d0; }
+            QPushButton:disabled { color: #999; }
+            QProgressBar { border: 1px solid #ccc; border-radius: 3px; text-align: center; }
+            QProgressBar::chunk { background-color: #0078d4; border-radius: 3px; }
+            QComboBox { border: 1px solid #ccc; padding: 4px; border-radius: 2px; }
+            QComboBox:hover { border: 1px solid #999; }
+            QComboBox QAbstractItemView { selection-background-color: #0078d4; }
+            QComboBox QAbstractItemView::item:hover { background-color: #e0e0e0; }
+            QChartView { background-color: white; }
+        """)
     
     def on_dual_integration_toggled(self, checked):
         self.settings.set('dual_integration', checked)
@@ -1446,8 +1408,10 @@ class MainApplicationWindow(QMainWindow):
             
             if success:
                 self.is_connected = True
-                self.connect_button.setText(self.tr('disconnect'))
+                self.connect_button.setText("Отключить")
                 self.start_button.setEnabled(True)
+                self.calibration_button.setEnabled(True)
+                self.calibration_reset_button.setEnabled(True)
                 self.capture_button.setEnabled(True)
                 
                 self.measurement.set_slit_widths(
@@ -1456,12 +1420,12 @@ class MainApplicationWindow(QMainWindow):
                 )
             else:
                 self.is_connected = False
-                self.connect_button.setText(self.tr('connect'))
-                error_box = QMessageBox()
-                error_box.setIcon(QMessageBox.Critical)
-                error_box.setWindowTitle(self.tr('connection_error_title'))
-                error_box.setText(self.tr('connection_error'))
-                error_box.exec_()
+                self.connect_button.setText("Подключить")
+                QMessageBox.critical(
+                    self,
+                    "Ошибка подключения",
+                    "Не удалось подключить оборудование!\nПроверьте соединения!"
+                )
             
             self.connect_button.setEnabled(True)
         
@@ -1474,8 +1438,10 @@ class MainApplicationWindow(QMainWindow):
             self.measurement.disconnect_instruments()
             
             self.is_connected = False
-            self.connect_button.setText(self.tr('connect'))
+            self.connect_button.setText("Подключить")
             self.start_button.setEnabled(False)
+            self.calibration_button.setEnabled(False)
+            self.calibration_reset_button.setEnabled(False)
             self.capture_button.setEnabled(False)
             
             self.connect_button.setEnabled(True)
@@ -1483,16 +1449,19 @@ class MainApplicationWindow(QMainWindow):
         threading.Thread(target=disconnection_task, daemon=True).start()
     
     def reset_parameters(self):
-        self.laser_wavelength_edit.setText("1064.0")
-        self.start_wavelength_edit.setText("1300.0")
-        self.end_wavelength_edit.setText("1400.0")
-        self.wavelength_step_edit.setText("0.5")
-        self.input_slit_edit.setText("100.0")
-        self.output_slit_edit.setText("100.0")
-        self.oscilloscope_channel_edit.setText("1")
-        self.average_count_edit.setText("1024")
-        self.power_average_edit.setText("10")
-        self.energy_points_edit.setText("10")
+        self.settings.reset_to_defaults()
+        
+        self.laser_wavelength_edit.setText(str(self.settings.get('laser_wavelength', 1064.0)))
+        self.start_wavelength_edit.setText(str(self.settings.get('start_wavelength', 1300.0)))
+        self.end_wavelength_edit.setText(str(self.settings.get('end_wavelength', 1400.0)))
+        self.wavelength_step_edit.setText(str(self.settings.get('wavelength_step', 0.5)))
+        self.input_slit_edit.setText(str(self.settings.get('input_slit', 100.0)))
+        self.output_slit_edit.setText(str(self.settings.get('output_slit', 100.0)))
+        self.oscilloscope_channel_edit.setText(str(self.settings.get('oscilloscope_channel', 1)))
+        self.average_count_edit.setText(str(self.settings.get('average_count', 1024)))
+        self.power_average_edit.setText(str(self.settings.get('power_average_count', 10)))
+        self.energy_points_edit.setText(str(self.settings.get('energy_points', 10)))
+        self.reference_peak_edit.setText(str(self.settings.get('reference_peak', 1308.0)))
         self.dual_integration_checkbox.setChecked(False)
         
         self.baseline_start_edit.setText("-1e-05")
@@ -1502,9 +1471,9 @@ class MainApplicationWindow(QMainWindow):
         self.signal2_start_edit.setText("1e-05")
         self.signal2_end_edit.setText("3e-05")
         
-        self.signal_wavelength_edit.setText("1300.0")
-        self.signal_input_slit_edit.setText("100.0")
-        self.signal_output_slit_edit.setText("100.0")
+        self.signal_wavelength_edit.setText(str(self.settings.get('start_wavelength', 1300.0)))
+        self.signal_input_slit_edit.setText(str(self.settings.get('input_slit', 100.0)))
+        self.signal_output_slit_edit.setText(str(self.settings.get('output_slit', 100.0)))
         
         self.apply_parameters()
     
@@ -1520,6 +1489,7 @@ class MainApplicationWindow(QMainWindow):
             self.measurement.configuration.oscilloscope_average_count = int(self.average_count_edit.text())
             self.measurement.configuration.power_meter_average_count = int(self.power_average_edit.text())
             self.measurement.configuration.dual_integration_enabled = self.dual_integration_checkbox.isChecked()
+            self.measurement.configuration.reference_peak_nanometers = float(self.reference_peak_edit.text())
             
             self.settings.set('laser_wavelength', float(self.laser_wavelength_edit.text()))
             self.settings.set('start_wavelength', float(self.start_wavelength_edit.text()))
@@ -1532,6 +1502,7 @@ class MainApplicationWindow(QMainWindow):
             self.settings.set('power_average_count', int(self.power_average_edit.text()))
             self.settings.set('dual_integration', self.dual_integration_checkbox.isChecked())
             self.settings.set('energy_points', int(self.energy_points_edit.text()))
+            self.settings.set('reference_peak', float(self.reference_peak_edit.text()))
             
             if self.measurement.is_chromator_connected:
                 self.measurement.set_slit_widths(
@@ -1561,7 +1532,10 @@ class MainApplicationWindow(QMainWindow):
                 self.measurement.configuration.oscilloscope_signal_channel = int(self.oscilloscope_channel_edit.text())
                 self.measurement.configuration.oscilloscope_average_count = int(self.average_count_edit.text())
                 
+                self.measurement.setup_oscilloscope()
+                
                 success = self.measurement.capture_test_signal()
+                
                 if success:
                     self.signal_plot.set_signal_data(
                         self.measurement.test_signal_time,
@@ -1619,6 +1593,71 @@ class MainApplicationWindow(QMainWindow):
                 self.signal2_start_edit.setText(f"{position_x:.6e}")
             elif "Правый сигнал 2" in label_text:
                 self.signal2_end_edit.setText(f"{position_x:.6e}")
+    
+    def perform_calibration(self):
+        if not self.is_connected:
+            return
+        
+        def calibration_task():
+            self.calibration_button.setEnabled(False)
+            self.start_button.setEnabled(False)
+            
+            try:
+                reference_peak = float(self.reference_peak_edit.text())
+                
+                self.measurement.configuration.reference_peak_nanometers = reference_peak
+                self.settings.set('reference_peak', reference_peak)
+                
+                self.progress_bar.setValue(0)
+                
+                self.measurement.scan_spectrum(self.update_progress)
+                
+                if not self.measurement.stop_requested and self.measurement.wavelengths_for_spectrum:
+                    offset, success = self.measurement.perform_calibration(reference_peak)
+                    
+                    if success:
+                        self.calibration_offset_value.setText(f"{offset:.2f} нм")
+                        self.calibration_status_value.setText("Выполнена")
+                        self.calibration_status_value.setStyleSheet("color: green;")
+                        
+                        QMessageBox.information(
+                            self,
+                            "Калибровка выполнена",
+                            f"Смещение калибровки: {offset:.2f} нм\n"
+                            f"Эталонный пик: {reference_peak:.1f} нм\n"
+                            f"Измеренный пик: {reference_peak + offset:.1f} нм"
+                        )
+                    else:
+                        self.calibration_status_value.setText("Не выполнена")
+                        self.calibration_status_value.setStyleSheet("color: #888;")
+                        QMessageBox.warning(
+                            self,
+                            "Ошибка калибровки",
+                            "Не удалось найти пик спектра!\n"
+                            "Проверьте настройки измерения."
+                        )
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    f"Произошла ошибка при калибровке:\n{str(e)}"
+                )
+            
+            self.calibration_button.setEnabled(True)
+            self.start_button.setEnabled(True)
+        
+        threading.Thread(target=calibration_task, daemon=True).start()
+    
+    def reset_calibration(self):
+        self.measurement.reset_calibration()
+        self.calibration_offset_value.setText("0.00 нм")
+        self.calibration_status_value.setText("Не выполнена")
+        self.calibration_status_value.setStyleSheet("color: #888;")
+        
+        if self.measurement.is_chromator_connected:
+            self.measurement.set_chromator_wavelength(
+                self.measurement.configuration.start_wavelength_nanometers
+            )
     
     def start_experiment(self):
         if self.is_running:
@@ -1678,68 +1717,72 @@ class MainApplicationWindow(QMainWindow):
         self.progress_bar.setValue(value)
         QApplication.processEvents()
     
+    def export_spectrum_to_file(self):
+        data = self.measurement.get_saved_data()
+        
+        if not data['spectrum']['wavelengths']:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных для экспорта!")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт спектра", "",
+            "CSV files (*.csv);;JSON files (*.json);;All files (*.*)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            if file_path.endswith('.json'):
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            elif file_path.endswith('.csv'):
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("wavelength_nanometers,integrated_signal,approximated_signal\n")
+                    for i in range(len(data['spectrum']['wavelengths'])):
+                        f.write(f"{data['spectrum']['wavelengths'][i]:.3f},"
+                                f"{data['spectrum']['integrated_values'][i]:.6e},"
+                                f"{data['spectrum']['approximated_values'][i]:.6e}\n")
+            QMessageBox.information(self, "Успех", f"Данные сохранены в {file_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{str(e)}")
+    
+    def export_energy_to_file(self):
+        data = self.measurement.get_saved_data()
+        
+        if not data['energy']['energy_values']:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных для экспорта!")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт энергии", "",
+            "CSV files (*.csv);;JSON files (*.json);;All files (*.*)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            if file_path.endswith('.json'):
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data['energy'], f, indent=2, ensure_ascii=False)
+            elif file_path.endswith('.csv'):
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("energy_value,integrated_signal,approximated_signal\n")
+                    for i in range(len(data['energy']['energy_values'])):
+                        f.write(f"{data['energy']['energy_values'][i]:.6e},"
+                                f"{data['energy']['integrated_values'][i]:.6e},"
+                                f"{data['energy']['approximated_values'][i]:.6e}\n")
+            QMessageBox.information(self, "Успех", f"Данные сохранены в {file_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{str(e)}")
+    
     def save_graph_as_png(self, plot_view):
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Graph", "",
+            self, "Сохранить график", "",
             "PNG files (*.png);;All files (*.*)"
         )
         if file_path:
             pixmap = plot_view.grab()
             pixmap.save(file_path, 'PNG')
-    
-    def save_spectrum_to_file(self):
-        if not self.measurement.wavelengths_for_spectrum:
-            return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Spectrum Data", "",
-            "CSV files (*.csv);;All files (*.*)"
-        )
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as file_handle:
-                    file_handle.write("wavelength_nanometers,integrated_signal_1,approximated_signal_1")
-                    if self.settings.get('dual_integration', False):
-                        file_handle.write(",integrated_signal_2,approximated_signal_2")
-                    file_handle.write("\n")
-                    
-                    for index in range(len(self.measurement.wavelengths_for_spectrum)):
-                        line = f"{self.measurement.wavelengths_for_spectrum[index]:.3f},"
-                        line += f"{self.measurement.integrated_values[index]:.6e},"
-                        line += f"{self.measurement.approximated_values[index]:.6e}"
-                        if self.settings.get('dual_integration', False):
-                            line += f",{self.measurement.integrated_values_2[index]:.6e},"
-                            line += f"{self.measurement.approximated_values_2[index]:.6e}"
-                        file_handle.write(line + "\n")
-            except Exception:
-                pass
-    
-    def save_energy_to_file(self):
-        if not self.measurement.energy_values:
-            return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Energy Data", "",
-            "CSV files (*.csv);;All files (*.*)"
-        )
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as file_handle:
-                    file_handle.write("energy_value,integrated_signal_1,approximated_signal_1")
-                    if self.settings.get('dual_integration', False):
-                        file_handle.write(",integrated_signal_2,approximated_signal_2")
-                    file_handle.write("\n")
-                    
-                    for index in range(len(self.measurement.energy_values)):
-                        line = f"{self.measurement.energy_values[index]:.6e},"
-                        line += f"{self.measurement.integrated_values[index]:.6e},"
-                        line += f"{self.measurement.approximated_values[index]:.6e}"
-                        if self.settings.get('dual_integration', False):
-                            line += f",{self.measurement.integrated_values_2[index]:.6e},"
-                            line += f"{self.measurement.approximated_values_2[index]:.6e}"
-                        file_handle.write(line + "\n")
-            except Exception:
-                pass
     
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self.title_bar.geometry().contains(event.pos()):
@@ -1756,6 +1799,7 @@ class MainApplicationWindow(QMainWindow):
         if hasattr(self, 'dragging'):
             self.dragging = False
         super().mouseReleaseEvent(event)
+
 
 if __name__ == "__main__":
     application = QApplication(sys.argv)
