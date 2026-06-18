@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import pyvisa
 import tempfile
 import threading
 import tkinter as tk
@@ -1037,54 +1036,29 @@ class DeviceManager:
                 pass
 
 
-    def capture_oscilloscope_waveform(self, averaged=False, average_count=64):
+    def capture_waveform(self, averaged=False, average_count=64):
         if not self.oscilloscope_connected or not self.oscilloscope_device:
             return None, None
 
         try:
             channel = int(self.oscilloscope_channel_variable.get())
 
-            try:
-                self.oscilloscope_device.stop_acquisition()
-                time.sleep(0.3)
-            except:
-                pass
-
-            try:
-                self.oscilloscope_device.set_channel_enabled(channel, True)
-                self.oscilloscope_device.set_channel_scale(channel, 1.0)
-                self.oscilloscope_device.set_channel_offset(channel, 0.0)
-                self.oscilloscope_device.set_channel_coupling(channel, "DC")
-                self.oscilloscope_device.set_timebase_scale(0.001)
-                time.sleep(0.3)
-            except:
-                pass
-
-            try:
-                self.oscilloscope_device.run_acquisition()
-                time.sleep(0.5)
-                self.oscilloscope_device.stop_acquisition()
-                time.sleep(0.3)
-            except:
-                pass
-
-            time_values = []
-            voltage_values = []
-
             for attempt in range(3):
                 try:
                     if averaged:
-                        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform_retry(channel, average_count, 2000, max_retries=2)
+                        time_values, voltage_values = self.oscilloscope_device.acquire_averaged_waveform_retry(
+                            channel, average_count, 2000, max_retries=2
+                        )
                     else:
                         time_values, voltage_values = self.oscilloscope_device.capture_waveform(channel, 2000)
 
-                    if time_values and voltage_values:
-                        break
+                    if time_values and voltage_values and len(voltage_values) > 10:
+                        return time_values, voltage_values
                 except:
                     time.sleep(0.5)
                     continue
 
-            return time_values, voltage_values
+            return None, None
         except:
             return None, None
 
@@ -1174,12 +1148,11 @@ class DeviceManager:
     def capture_and_save_waveform(self, averaged=False, average_count=64, format_type="both"):
         def task():
             try:
-                time_values, voltage_values = self.capture_oscilloscope_waveform(averaged, average_count)
+                time_values, voltage_values = self.capture_waveform(averaged, average_count)
 
                 if time_values is None or voltage_values is None:
                     def show_error():
                         messagebox.showwarning("Предупреждение", "Не удалось захватить сигнал!")
-
                     self.root_window.after(0, show_error)
                     return
 
@@ -1365,8 +1338,10 @@ class DeviceManager:
 
         def task():
             level = self._safe_get_float(entry, min_value=0.1, max_value=99.9, error_message="Введите число от 0.1 до 99.9!")
+
             if level is None:
                 return
+
             self.energymeter_device.set_trigger_level(level)
             self.update_energymeter_status()
 

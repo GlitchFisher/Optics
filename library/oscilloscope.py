@@ -1,6 +1,7 @@
 import numpy
 import pyvisa
 import time
+import re
 
 from typing import Any
 from typing import Dict
@@ -242,6 +243,66 @@ class Oscilloscope:
         return False
 
 
+    def wait_for_ready_polling(self, timeout_seconds: float = 30.0) -> bool:
+        if not self._is_safe_to_operate():
+            return False
+        
+        original_timeout = self._instrument.timeout
+        self._instrument.timeout = 500
+        
+        try:
+            start_time = time.time()
+            while time.time() - start_time < timeout_seconds:
+                try:
+                    self._write_raw("*OPC?")
+                    response = self._read_raw()
+                    if response.strip() == "1":
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            return False
+        finally:
+            self._instrument.timeout = original_timeout
+
+
+    def wait_for_average_complete(self, average_count: int, timeout_seconds: float = 120.0) -> bool:
+        if not self._is_safe_to_operate():
+            return False
+        
+        original_timeout = self._instrument.timeout
+        self._instrument.timeout = 500
+        
+        try:
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout_seconds:
+                try:
+                    self._write_raw(":ACQuire:COMPlete?")
+                    response = self._read_raw()
+                    
+                    if response.strip():
+                        completion = int(float(response))
+                        if completion >= 100:
+                            return True
+                    
+                    if average_count > 4096:
+                        time.sleep(0.5)
+                    elif average_count > 1024:
+                        time.sleep(0.3)
+                    elif average_count > 256:
+                        time.sleep(0.2)
+                    else:
+                        time.sleep(0.1)
+                        
+                except Exception:
+                    time.sleep(0.1)
+                    
+            return False
+        finally:
+            self._instrument.timeout = original_timeout
+
+
     def disconnect(self):
         if self._instrument is not None:
             try:
@@ -424,7 +485,7 @@ class Oscilloscope:
         if self._is_safe_to_operate():
             if channel_number >= 1 and channel_number <= self._capabilities.get("maximum_channels", 4):
                 self._write_raw(f":CHANnel{channel_number}:DISPlay {1 if enable_status else 0}")
-                time.sleep(0.1)
+                time.sleep(0.05)
 
 
     def is_channel_enabled(self, channel_number: int) -> bool:
@@ -794,6 +855,7 @@ class Oscilloscope:
         if self._is_safe_to_operate():
             if acquisition_type in valid_types:
                 self._write_raw(f":ACQuire:TYPE {acquisition_type}")
+                time.sleep(0.05)
 
 
     def get_acquisition_type(self) -> str:
@@ -814,10 +876,10 @@ class Oscilloscope:
                 averages_number = 65536
 
             self._write_raw(f":ACQuire:COUNt {averages_number}")
-            time.sleep(0.1)
+            time.sleep(0.05)
 
             self._write_raw(":ACQuire:TYPE AVER")
-            time.sleep(0.1)
+            time.sleep(0.05)
 
 
     def get_average_count(self) -> int:
@@ -1091,61 +1153,80 @@ class Oscilloscope:
                 self._write_raw(f":MATH:FFT:WINDow {window_type}")
 
 
-    def _get_waveform_preable(self) -> Dict[str, Any]:
+    def _get_waveform_preamble(self) -> Dict[str, Any]:
         if not self._is_safe_to_operate():
             return {}
 
         try:
             self._write_raw(":WAVeform:PREamble?")
-            time.sleep(0.5)
+            time.sleep(0.1)
 
-            preable_string = self._read_raw()
+            preamble_string = self._read_raw()
 
-            if not preable_string:
+            if not preamble_string:
                 return {}
 
-            preable_parts = preable_string.split(",")
+            preamble_string = preamble_string.replace("\n", "").replace("\r", "").strip()
+            preamble_parts = preamble_string.split(",")
 
-            if len(preable_parts) < 10:
+            if len(preamble_parts) < 10:
                 return {}
 
-            preable = {
-                "format_code": int(preable_parts[0]),
-                "acquisition_type": int(preable_parts[1]),
-                "points_count": int(preable_parts[2]),
-                "average_count": int(preable_parts[3]),
-                "x_increment": float(preable_parts[4]),
-                "x_origin": float(preable_parts[5]),
-                "x_reference": float(preable_parts[6]),
-                "y_increment": float(preable_parts[7]),
-                "y_origin": float(preable_parts[8]),
-                "y_reference": float(preable_parts[9])
+            preamble = {
+                "format_code": int(preamble_parts[0]),
+                "acquisition_type": int(preamble_parts[1]),
+                "points_count": int(preamble_parts[2]),
+                "average_count": int(preamble_parts[3]),
+                "x_increment": float(preamble_parts[4]),
+                "x_origin": float(preamble_parts[5]),
+                "x_reference": float(preamble_parts[6]),
+                "y_increment": float(preamble_parts[7]),
+                "y_origin": float(preamble_parts[8]),
+                "y_reference": float(preamble_parts[9])
             }
 
-            return preable
+            return preamble
         except Exception:
             return {}
 
 
     def _read_waveform_data(self, points_count: int = 2000) -> List[float]:
         if not self._is_safe_to_operate():
-            voltage_values = []
+            return []
+
+        self._write_raw(f":WAVeform:POINts {points_count}")
+        self._write_raw(":WAVeform:FORMat ASCII")
+        self._write_raw(":WAVeform:DATA?")
+        time.sleep(0.1)
+
+        data_string = self._read_raw()
+
+        if data_string.startswith("#"):
+            header_length = int(data_string[1])
+            data_string = data_string[2 + header_length:]
+
+        if not data_string:
+            return []
+
+        data_string = data_string.replace("\n", "").replace("\r", "").strip()
+
+        data_string = re.sub(r'[^0-9eE+\-., ]', '', data_string)
+
+        if "," in data_string:
+            parts = data_string.split(",")
         else:
-            self._write_raw(f":WAVeform:POINts {points_count}")
-            self._write_raw(":WAVeform:FORMat ASCII")
-            self._write_raw(":WAVeform:DATA?")
-            time.sleep(0.3)
+            parts = data_string.split()
 
-            data_string = self._read_raw()
+        voltage_values = []
 
-            if data_string.startswith("#"):
-                header_length = int(data_string[1])
-                data_string = data_string[2 + header_length:]
+        for part in parts:
+            part = part.strip()
 
-            if not data_string:
-                voltage_values = []
-            else:
-                voltage_values = [float(single_value) for single_value in data_string.strip().split(",")]
+            if part:
+                try:
+                    voltage_values.append(float(part))
+                except ValueError:
+                    continue
 
         return voltage_values
 
@@ -1161,134 +1242,183 @@ class Oscilloscope:
         self._instrument.timeout = 10000
 
         try:
+            current_acquisition_type = self.get_acquisition_type()
+            current_average_count = self.get_average_count()
+        except:
+            current_acquisition_type = "NORM"
+            current_average_count = 2
+
+        try:
+            self._write_raw(":STOP")
+            time.sleep(0.1)
+
+            self._write_raw(":RUN")
+            time.sleep(0.1)
+
+            self._write_raw(":STOP")
+            time.sleep(0.1)
+
             self._write_raw(f":WAVeform:SOURce CHAN{channel_number}")
             self._write_raw(f":WAVeform:POINts {points_count}")
             self._write_raw(":WAVeform:FORMat ASCII")
 
-            self._write_raw(":WAVeform:DATA?")
-            time.sleep(0.5)
+            voltage_values = self._read_waveform_data(points_count)
 
-            data_string = self._read_raw()
+            if not voltage_values:
+                self._write_raw(":RUN")
 
-            if not data_string:
                 return [], []
 
-            if data_string.startswith("#"):
-                header_length = int(data_string[1])
-                data_string = data_string[2 + header_length:]
+            preamble = self._get_waveform_preamble()
 
-            if not data_string:
-                return [], []
+            if preamble:
+                x_increment = preamble.get("x_increment", 1.0)
+                x_origin = preamble.get("x_origin", 0.0)
+            else:
+                timebase = self.get_timebase_scale()
+                x_increment = timebase * 10 / points_count
+                x_origin = -x_increment * points_count / 2
 
-            voltage_values = [float(single_value) for single_value in data_string.strip().split(",")]
-
-            preable = self._get_waveform_preable()
-
-            if not preable:
-                return [], []
-
-            x_increment = preable.get("x_increment", 1.0)
-            x_origin = preable.get("x_origin", 0.0)
             time_values = [x_origin + index * x_increment for index in range(len(voltage_values))]
 
+            self._write_raw(":RUN")
+            time.sleep(0.1)
+
             return time_values, voltage_values
+        except Exception:
+            try:
+                self._write_raw(":RUN")
+            except:
+                pass
+
+            return [], []
+        finally:
+            try:
+                self.set_acquisition_type(current_acquisition_type)
+                time.sleep(0.05)
+
+                self.set_average_count(current_average_count)
+                time.sleep(0.05)
+            except:
+                pass
+
+            self._instrument.timeout = old_timeout
+
+
+    def acquire_averaged_waveform(self, channel_number: int = 1, average_count: int = 64, points_count: int = 2000, timeout_seconds: float = 180.0) -> Tuple[List[float], List[float]]:
+        if not self._is_safe_to_operate():
+            return [], []
+        elif channel_number < 1 or channel_number > self._capabilities.get("maximum_channels", 4):
+            return [], []
+        elif not self._capabilities.get("has_average_mode", False):
+            return [], []
+
+        old_average_count = self.get_average_count()
+        old_acquisition_type = self.get_acquisition_type()
+        old_timeout = self._instrument.timeout
+        self._instrument.timeout = 60000
+
+        try:
+            self.set_acquisition_type(self.acquisition_type_average)
+            self.set_average_count(average_count)
+            time.sleep(0.1)
+
+            self._write_raw(":RUN")
+            time.sleep(0.1)
+
+            if average_count <= 256:
+                wait_time = max(0.5, average_count / 20)
+                time.sleep(wait_time)
+            else:
+                start_time = time.time()
+                data_ready = False
+
+                while time.time() - start_time < timeout_seconds:
+                    try:
+                        completion = self._query_integer(":ACQuire:COMPlete?")
+
+                        if completion >= 100:
+                            data_ready = True
+
+                            break
+                    except:
+                        pass
+
+                    if average_count > 4096:
+                        time.sleep(0.5)
+                    elif average_count > 1024:
+                        time.sleep(0.3)
+                    else:
+                        time.sleep(0.2)
+
+                if not data_ready:
+                    time.sleep(min(average_count / 10, 30.0))
+
+            if average_count > 512:
+                wait_time = min(average_count / 20, 60.0)
+                time.sleep(wait_time)
+            elif average_count > 128:
+                time.sleep(min(average_count / 50, 10.0))
+
+            self._write_raw(":STOP")
+            time.sleep(0.2)
+
+            self._write_raw(f":DIGitize CHANnel{channel_number}")
+            
+            if not self.wait_for_ready_polling(30.0):
+                self.set_acquisition_type(old_acquisition_type)
+                self.set_average_count(old_average_count)
+                self._write_raw(":RUN")
+
+                return [], []
+
+            self._write_raw(f":WAVeform:SOURce CHAN{channel_number}")
+            self._write_raw(f":WAVeform:POINts {points_count}")
+            self._write_raw(":WAVeform:FORMat ASCII")
+
+            voltage_values = self._read_waveform_data(points_count)
+
+            if not voltage_values:
+                self.set_acquisition_type(old_acquisition_type)
+                self.set_average_count(old_average_count)
+                self._write_raw(":RUN")
+
+                return [], []
+
+            preamble = self._get_waveform_preamble()
+
+            if preamble:
+                x_increment = preamble.get("x_increment", 1.0)
+                x_origin = preamble.get("x_origin", 0.0)
+            else:
+                timebase = self.get_timebase_scale()
+                x_increment = timebase * 10 / points_count
+                x_origin = -x_increment * points_count / 2
+
+            time_values = [x_origin + index * x_increment for index in range(len(voltage_values))]
+
+            self.set_acquisition_type(old_acquisition_type)
+            time.sleep(0.05)
+            self.set_average_count(old_average_count)
+            time.sleep(0.05)
+            self._write_raw(":RUN")
+            time.sleep(0.05)
+
+            return time_values, voltage_values
+        except Exception:
+            try:
+                self.set_acquisition_type(old_acquisition_type)
+                self.set_average_count(old_average_count)
+                self._write_raw(":RUN")
+            except:
+                pass
+
+            return [], []
         finally:
             self._instrument.timeout = old_timeout
 
 
-    def acquire_averaged_waveform(self, channel_number: int = 1, average_count: int = 64, points_count: int = 2000, timeout_seconds: float = 120.0) -> Tuple[List[float], List[float]]:
-        if not self._is_safe_to_operate():
-            time_values = []
-            voltage_values = []
-        elif channel_number < 1 or channel_number > self._capabilities.get("maximum_channels", 4):
-            time_values = []
-            voltage_values = []
-        elif not self._capabilities.get("has_average_mode", False):
-            time_values = []
-            voltage_values = []
-        else:
-            old_acquisition_type = self.get_acquisition_type()
-            old_average_count = self.get_average_count()
-
-            self.set_acquisition_type(self.acquisition_type_average)
-            self.set_average_count(average_count)
-            time.sleep(0.05)
-
-            self.run_acquisition()
-            time.sleep(0.05)
-
-            start_time = time.time()
-            data_ready = False
-
-            while time.time() - start_time < timeout_seconds:
-                try:
-                    if self.is_acquisition_complete():
-                        data_ready = True
-
-                        break
-                except Exception:
-                    pass
-
-                time.sleep(0.05)
-
-            if not data_ready:
-                self.set_acquisition_type(old_acquisition_type)
-                self.set_average_count(old_average_count)
-                time_values = []
-                voltage_values = []
-            else:
-                if average_count >= 65536:
-                    extra_delay = 20.0
-                elif average_count >= 32768:
-                    extra_delay = 16.0
-                elif average_count >= 16384:
-                    extra_delay = 12.0
-                elif average_count >= 8192:
-                    extra_delay = 10.0
-                elif average_count >= 4096:
-                    extra_delay = 8.0
-                elif average_count >= 2048:
-                    extra_delay = 6.0
-                elif average_count >= 1024:
-                    extra_delay = 5.0
-                elif average_count >= 512:
-                    extra_delay = 4.0
-                elif average_count >= 256:
-                    extra_delay = 3.0
-                else:
-                    extra_delay = 1.0
-
-                time.sleep(extra_delay)
-
-                self.stop_acquisition()
-                time.sleep(0.05)
-
-                preable = self._get_waveform_preable()
-
-                if not preable:
-                    self.set_acquisition_type(old_acquisition_type)
-                    self.set_average_count(old_average_count)
-                    time_values = []
-                    voltage_values = []
-                else:
-                    voltage_values = self._read_waveform_data(points_count)
-
-                    self.set_acquisition_type(old_acquisition_type)
-                    self.set_average_count(old_average_count)
-
-                    if not voltage_values:
-                        time_values = []
-                        voltage_values = []
-                    else:
-                        x_increment = preable.get("x_increment", 1.0)
-                        x_origin = preable.get("x_origin", 0.0)
-
-                        time_values = [x_origin + index * x_increment for index in range(len(voltage_values))]
-
-        return time_values, voltage_values
-
-
-    def acquire_averaged_waveform_retry(self, channel_number: int = 1, average_count: int = 64, points_count: int = 2000, max_retries: int = 3, timeout_seconds: float = 120.0) -> Tuple[List[float], List[float]]:
+    def acquire_averaged_waveform_retry(self, channel_number: int = 1, average_count: int = 64, points_count: int = 2000, max_retries: int = 3, timeout_seconds: float = 180.0) -> Tuple[List[float], List[float]]:
         time_values = []
         voltage_values = []
 
@@ -1300,12 +1430,11 @@ class Oscilloscope:
             if time_values and voltage_values:
                 break
 
-            time.sleep(0.5)
-
+            time.sleep(1.0)
             self.stop_acquisition()
-            time.sleep(0.1)
+            time.sleep(0.2)
             self.run_acquisition()
-            time.sleep(0.1)
+            time.sleep(0.2)
 
         return time_values, voltage_values
 
@@ -1338,28 +1467,22 @@ class Oscilloscope:
 
     def capture_segmented_waveform(self, segment_index: int, channel_number: int = 1, points_count: int = 2000) -> Tuple[List[float], List[float]]:
         if not self._is_safe_to_operate():
-            time_values = []
-            voltage_values = []
+            return [], []
         elif not self._capabilities.get("has_segmented_memory", False):
-            time_values = []
-            voltage_values = []
+            return [], []
         else:
             self._write_raw(f":ACQuire:SEGMent:INDex {segment_index}")
 
-            time_values, voltage_values = self.capture_waveform(channel_number, points_count)
-
-        return time_values, voltage_values
+            return self.capture_waveform(channel_number, points_count)
 
 
     def get_segment_count(self) -> int:
         if not self._is_safe_to_operate():
-            segment_count = 0
+            return 0
         elif not self._capabilities.get("has_segmented_memory", False):
-            segment_count = 0
+            return 0
         else:
-            segment_count = self._query_integer(":ACQuire:SEGMent:COUNt?")
-
-        return segment_count
+            return self._query_integer(":ACQuire:SEGMent:COUNt?")
 
 
     def set_segment_count(self, segment_quantity: int):
@@ -1371,9 +1494,9 @@ class Oscilloscope:
 
     def setup_for_experiment(self, channel_number: int = 1, volts_per_division: float = 1.0, seconds_per_division: float = 0.01) -> bool:
         if not self._is_safe_to_operate():
-            setup_successful = False
+            return False
         elif channel_number < 1 or channel_number > self._capabilities.get("maximum_channels", 4):
-            setup_successful = False
+            return False
         else:
             try:
                 self.stop_acquisition()
@@ -1389,16 +1512,14 @@ class Oscilloscope:
                 self.set_trigger_slope(self.trigger_slope_positive)
                 self.run_acquisition()
 
-                setup_successful = True
+                return True
             except Exception:
-                setup_successful = False
-
-        return setup_successful
+                return False
 
 
     def save_screenshot(self, file_name: str = None) -> str:
         if not self._is_safe_to_operate():
-            saved_file_name = ""
+            return ""
         else:
             self._write_raw(":DISPlay:DATA? PNG")
 
@@ -1408,7 +1529,7 @@ class Oscilloscope:
                 image_data = None
 
             if not image_data:
-                saved_file_name = ""
+                return ""
             else:
                 if file_name is None:
                     file_name = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.png"
@@ -1421,11 +1542,9 @@ class Oscilloscope:
 
                         file_handle.write(image_data)
 
-                    saved_file_name = file_name
+                    return file_name
                 except Exception:
-                    saved_file_name = ""
-
-        return saved_file_name
+                    return ""
 
 
     def save_setup(self, memory_location: str = "1"):
@@ -1440,31 +1559,27 @@ class Oscilloscope:
 
     def get_ip_address(self) -> str:
         if not self._is_safe_to_operate():
-            ip_address = ""
+            return ""
         else:
             try:
-                ip_address = self._query_string(":SYSTem:COMMunicate:LAN:IPADdress?")
+                return self._query_string(":SYSTem:COMMunicate:LAN:IPADdress?")
             except Exception:
-                ip_address = ""
-
-        return ip_address
+                return ""
 
 
     def get_mac_address(self) -> str:
         if not self._is_safe_to_operate():
-            mac_address = ""
+            return ""
         else:
             try:
-                mac_address = self._query_string(":SYSTem:COMMunicate:LAN:MAC?")
+                return self._query_string(":SYSTem:COMMunicate:LAN:MAC?")
             except Exception:
-                mac_address = ""
-
-        return mac_address
+                return ""
 
 
     def get_device_information(self) -> Dict[str, str]:
         if not self._is_safe_to_operate():
-            device_info = {
+            return {
                 "manufacturer": "Unknown",
                 "model_number": "Unknown",
                 "serial_number": "Unknown",
@@ -1492,12 +1607,12 @@ class Oscilloscope:
             except Exception:
                 pass
 
-        return device_info
+            return device_info
 
 
     def get_all_settings(self) -> Dict[str, Any]:
         if not self._is_safe_to_operate():
-            all_settings = {}
+            return {}
         else:
             all_settings = {
                 "identification": self.get_identification(),
@@ -1521,17 +1636,17 @@ class Oscilloscope:
                 except Exception:
                     continue
 
-        return all_settings
+            return all_settings
 
 
     def compute_waveform_statistics(self, voltage_values: List[float]) -> Dict[str, float]:
         if not voltage_values:
-            statistics = {}
+            return {}
         else:
             try:
                 voltage_array = numpy.array(voltage_values)
 
-                statistics = {
+                return {
                     "points_count": len(voltage_values),
                     "maximum_voltage": float(numpy.max(voltage_array)),
                     "minimum_voltage": float(numpy.min(voltage_array)),
@@ -1541,6 +1656,4 @@ class Oscilloscope:
                     "standard_deviation": float(numpy.std(voltage_array))
                 }
             except Exception:
-                statistics = {}
-
-        return statistics
+                return {}
