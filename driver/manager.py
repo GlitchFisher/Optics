@@ -19,7 +19,7 @@ class DriverManager:
         if getattr(sys, "frozen", False):
             base_path = Path(sys._MEIPASS)
         else:
-            base_path = Path(__file__).parent.parent
+            base_path = Path(__file__).parent
 
         self.drivers_path = base_path
         self.root_window = None
@@ -136,7 +136,7 @@ class DriverManager:
                 error_code = ctypes.windll.kernel32.GetLastError()
                 error_message = self.get_windows_error_message(error_code)
                 log_widget.insert(tkinter.END, f"❌ Ошибка копирования:\n")
-                log_widget.insert(tkinter.END, f"{error_message}!\n")
+                log_widget.insert(tkinter.END, f"{error_message}\n")
                 log_widget.see(tkinter.END)
 
                 return False
@@ -157,6 +157,18 @@ class DriverManager:
             return buffer.value.strip()
         except Exception:
             return f"Неизвестная ошибка"
+
+
+    def run_pnputil(self, arguments):
+        old_redirection_value = ctypes.c_void_p()
+
+        try:
+            ctypes.windll.kernel32.Wow64DisableWow64FsRedirection(ctypes.byref(old_redirection_value))
+            result = subprocess.run([r"C:\Windows\System32\pnputil.exe"] + arguments, capture_output=True, creationflags=CREATE_NO_WINDOW)
+
+            return result
+        finally:
+            ctypes.windll.kernel32.Wow64RevertWow64FsRedirection(old_redirection_value)
 
 
     def install_device_driver(self, device, log_widget):
@@ -225,7 +237,7 @@ class DriverManager:
 
             return False
 
-        subprocess.run(["pnputil", "/scan-devices"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+        self.run_pnputil(["/scan-devices"])
 
         log_widget.insert(tkinter.END, f"✅ {device['device_name']}: установлен!\n")
         log_widget.see(tkinter.END)
@@ -233,45 +245,94 @@ class DriverManager:
         return True
 
 
+    def stop_driver_service(self, service_name):
+        try:
+            subprocess.run(["sc", "stop", service_name], capture_output=True, creationflags=CREATE_NO_WINDOW)
+            time.sleep(1)
+        except:
+            pass
+
+
+    def remove_device_by_hardware_id(self, hardware_id):
+        try:
+            subprocess.run(["pnputil", "/remove-device", hardware_id], capture_output=True, creationflags=CREATE_NO_WINDOW)
+            time.sleep(1)
+        except:
+            pass
+
+
     def uninstall_device_driver(self, device, log_widget):
+        log_widget.insert(tkinter.END, f"  ⏹️ Остановка службы...\n")
+        self.stop_driver_service(device["service_name"])
+        log_widget.see(tkinter.END)
+
+        log_widget.insert(tkinter.END, f"  ⚡ Отключение устройства...\n")
+        self.remove_device_by_hardware_id(device["identifiers"])
+        log_widget.see(tkinter.END)
+
+        log_widget.insert(tkinter.END, f"  ❌ Удаление из списка...\n")
         enum_path = device["identifiers"].replace("\\", "#")
 
         try:
             winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, f"SYSTEM\\CurrentControlSet\\Enum\\{enum_path}\\0")
-        except Exception:
+        except:
             pass
 
         try:
             winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, f"SYSTEM\\CurrentControlSet\\Enum\\{enum_path}")
-        except Exception:
+        except:
             pass
+
+        log_widget.see(tkinter.END)
+
+        log_widget.insert(tkinter.END, f"  ✂️ Удаление службы...\n")
 
         try:
             winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, f"SYSTEM\\CurrentControlSet\\Services\\{device['service_name']}")
-        except Exception:
+        except:
             pass
 
-        if self.file_exists_in_system32(device["system_file"]):
-            old_redirection_value = ctypes.c_void_p()
+        log_widget.see(tkinter.END)
 
-            try:
-                ctypes.windll.kernel32.Wow64DisableWow64FsRedirection(ctypes.byref(old_redirection_value))
-                file_path = f"C:\\Windows\\System32\\drivers\\{device['system_file']}"
-                os.remove(file_path)
-            except Exception:
-                pass
-            finally:
-                ctypes.windll.kernel32.Wow64RevertWow64FsRedirection(old_redirection_value)
+        log_widget.insert(tkinter.END, f"  ❌ Удаление {device['system_file']}...\n")
+        file_path = f"C:\\Windows\\System32\\drivers\\{device['system_file']}"
+        old_redirection = ctypes.c_void_p()
 
-        subprocess.run(["pnputil", "/scan-devices"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+        try:
+            ctypes.windll.kernel32.Wow64DisableWow64FsRedirection(ctypes.byref(old_redirection))
+
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    log_widget.insert(tkinter.END, f"  ✅ Файл удалён!\n")
+                except Exception:
+                    log_widget.insert(tkinter.END, f"  ⚠️ Принудительное удаление...\n")
+
+                    try:
+                        subprocess.run(["takeown", "/f", file_path], capture_output=True, creationflags=CREATE_NO_WINDOW)
+                        subprocess.run(["icacls", file_path, "/grant", "*S-1-5-32-544:F"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+                        os.remove(file_path)
+                        log_widget.insert(tkinter.END, f"  ✅ Файл принудительно удалён!\n")
+                    except Exception:
+                        log_widget.insert(tkinter.END, f"  ❌ Не удалось удалить файл!\n")
+            else:
+                log_widget.insert(tkinter.END, f"  ⚠️ Файл не найден!\n")
+        finally:
+            ctypes.windll.kernel32.Wow64RevertWow64FsRedirection(old_redirection)
+
+        log_widget.see(tkinter.END)
+
+        log_widget.insert(tkinter.END, f"  ⭕ Обновление списка...\n")
+        self.run_pnputil(["/scan-devices"])
+        log_widget.see(tkinter.END)
 
         if self.check_driver_installation(device):
-            log_widget.insert(tkinter.END, f"⚠️ {device['device_name']}: не удалён!\n")
+            log_widget.insert(tkinter.END, f"  ⚠️ {device['device_name']}: не удалён!\n")
             log_widget.see(tkinter.END)
 
             return False
         else:
-            log_widget.insert(tkinter.END, f"✅ {device['device_name']}: удалён!\n")
+            log_widget.insert(tkinter.END, f"  ✅ {device['device_name']}: удалён!\n")
             log_widget.see(tkinter.END)
 
             return True
@@ -335,7 +396,7 @@ class DriverManager:
 
                 progress_bar["maximum"] = len(self.devices_configuration)
 
-                for index, device in enumerate(reversed(self.devices_configuration)):
+                for index, device in enumerate(self.devices_configuration):
                     if not self.operation_in_progress:
                         break
 

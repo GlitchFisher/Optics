@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 
 def check_single_instance():
-    lock_file_path = Path(tempfile.gettempdir()) / "device_manager_running.lock"
+    lock_file_path = Path(tempfile.gettempdir()) / "device_center_running.lock"
 
     try:
         if lock_file_path.exists():
@@ -47,15 +47,22 @@ def get_library_path():
         return Path(__file__).resolve().parent.parent / "library"
 
 
+def get_sdk_path():
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "sdk"
+    else:
+        return Path(__file__).resolve().parent.parent / "sdk"
+
+
+def get_drivers_path():
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "drivers"
+    else:
+        return Path(__file__).resolve().parent.parent / "drivers"
+
+
 library_path = get_library_path()
 sys.path.insert(0, str(library_path))
-
-if getattr(sys, "frozen", False):
-    sdk_path = Path(sys._MEIPASS) / "sdk"
-    driver_path = Path(sys._MEIPASS) / "driver"
-else:
-    sdk_path = Path(__file__).resolve().parent.parent / "sdk"
-    driver_path = Path(__file__).resolve().parent.parent / "driver"
 
 
 from chromator import Chromator
@@ -64,7 +71,7 @@ from laser_source import LaserSource
 from oscilloscope import Oscilloscope
 
 
-class DeviceManager:
+class DeviceCenter:
     def __init__(self):
         if getattr(sys, "frozen", False):
             self.base_path = Path(sys._MEIPASS)
@@ -97,14 +104,12 @@ class DeviceManager:
         self.oscilloscope_average_spin = None
         self.oscilloscope_channel_variable = None
 
-
     def _safe_widget_configuration(self, widget, **kwargs):
         try:
             if widget and widget.winfo_exists():
                 widget.config(**kwargs)
         except:
             pass
-
 
     def _safe_label_configuration(self, label, text=None, foreground=None):
         try:
@@ -116,11 +121,9 @@ class DeviceManager:
         except:
             pass
 
-
     def _set_buttons_state(self, button_list, state):
         for button in button_list:
             self._safe_widget_configuration(button, state=state)
-
 
     def _safe_get_float(self, entry, min_value=None, max_value=None, error_message="Введите корректное число!"):
         try:
@@ -145,7 +148,6 @@ class DeviceManager:
             self.root_window.after(0, show_error)
             return None
 
-
     def _safe_get_int(self, entry, min_value=None, max_value=None, error_message="Введите корректное целое число!"):
         try:
             value = entry.get().strip()
@@ -168,7 +170,6 @@ class DeviceManager:
                 messagebox.showerror("Ошибка ввода", error_message)
             self.root_window.after(0, show_error)
             return None
-
 
     def update_chromator_status(self):
         with self.update_lock:
@@ -209,7 +210,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def update_laser_status(self):
         with self.update_lock:
             if not self.laser_connected or not self.laser_source_device:
@@ -247,7 +247,6 @@ class DeviceManager:
                     self._safe_label_configuration(self.status_labels.get("laser_shutter"), text="Закрыт", foreground="red")
             except:
                 pass
-
 
     def update_oscilloscope_status(self):
         with self.update_lock:
@@ -292,7 +291,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def update_energymeter_status(self):
         with self.update_lock:
             if not self.energymeter_connected or not self.energymeter_device:
@@ -326,7 +324,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def update_all_status(self):
         if not self.auto_update_enabled:
             return
@@ -347,11 +344,9 @@ class DeviceManager:
             self.status_timer.daemon = True
             self.status_timer.start()
 
-
     def start_auto_update(self):
         self.auto_update_enabled = True
         self.update_all_status()
-
 
     def stop_auto_update(self):
         self.auto_update_enabled = False
@@ -363,7 +358,6 @@ class DeviceManager:
                 pass
 
             self.status_timer = None
-
 
     def disconnect_all_devices(self):
         try:
@@ -408,7 +402,6 @@ class DeviceManager:
             self.energymeter_connected = False
             self.energymeter_device = None
 
-
     def connect_chromator(self):
         def task():
             with self.operation_lock:
@@ -442,7 +435,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def disconnect_chromator(self):
         def task():
             with self.operation_lock:
@@ -464,7 +456,6 @@ class DeviceManager:
                     self.update_chromator_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def connect_laser(self):
         def task():
@@ -499,7 +490,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def disconnect_laser(self):
         def task():
             with self.operation_lock:
@@ -521,7 +511,6 @@ class DeviceManager:
                     self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def connect_oscilloscope(self):
         def task():
@@ -564,7 +553,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def disconnect_oscilloscope(self):
         def task():
             with self.operation_lock:
@@ -591,7 +579,6 @@ class DeviceManager:
                     self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def connect_energymeter(self):
         def task():
@@ -626,7 +613,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def disconnect_energymeter(self):
         def task():
             with self.operation_lock:
@@ -649,7 +635,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_chromator_wavelength(self, entry):
         if not self.chromator_connected:
             return
@@ -664,7 +649,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_chromator_input_slit(self, entry):
         if not self.chromator_connected:
             return
@@ -677,7 +661,6 @@ class DeviceManager:
             self.update_chromator_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def set_chromator_output_slit(self, entry):
         if not self.chromator_connected:
@@ -693,7 +676,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def open_chromator_shutter(self):
         if self.chromator_connected:
             try:
@@ -702,7 +684,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def close_chromator_shutter(self):
         if self.chromator_connected:
             try:
@@ -710,7 +691,6 @@ class DeviceManager:
                 self.update_chromator_status()
             except:
                 pass
-
 
     def set_chromator_grating(self, spinbox):
         if self.chromator_connected:
@@ -727,7 +707,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def set_chromator_filter(self, combobox):
         if self.chromator_connected:
             try:
@@ -736,7 +715,6 @@ class DeviceManager:
                 self.update_chromator_status()
             except:
                 pass
-
 
     def set_chromator_mirror(self, combobox):
         if self.chromator_connected:
@@ -748,7 +726,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def reset_chromator_grating(self):
         if self.chromator_connected:
             try:
@@ -756,7 +733,6 @@ class DeviceManager:
                 self.update_chromator_status()
             except:
                 pass
-
 
     def set_laser_wavelength(self, entry):
         if not self.laser_connected:
@@ -772,7 +748,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_laser_absolute_position(self, entry):
         if not self.laser_connected:
             return
@@ -786,7 +761,6 @@ class DeviceManager:
             self.update_laser_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def set_laser_relative_position(self, entry):
         if not self.laser_connected:
@@ -802,7 +776,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_laser_speed(self, entry):
         if not self.laser_connected:
             return
@@ -816,7 +789,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def enable_laser_motor(self):
         if self.laser_connected:
             try:
@@ -824,7 +796,6 @@ class DeviceManager:
                 self.update_laser_status()
             except:
                 pass
-
 
     def disable_laser_motor(self):
         if self.laser_connected:
@@ -834,7 +805,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def open_laser_shutter(self):
         if self.laser_connected:
             try:
@@ -842,7 +812,6 @@ class DeviceManager:
                 self.update_laser_status()
             except:
                 pass
-
 
     def close_laser_shutter(self):
         if self.laser_connected:
@@ -852,7 +821,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def reset_laser(self):
         if self.laser_connected:
             try:
@@ -860,7 +828,6 @@ class DeviceManager:
                 self.update_laser_status()
             except:
                 pass
-
 
     def set_oscilloscope_scale(self, entry):
         if not self.oscilloscope_connected:
@@ -876,7 +843,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_oscilloscope_offset(self, entry):
         if not self.oscilloscope_connected:
             return
@@ -891,7 +857,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_oscilloscope_coupling(self, combobox):
         if self.oscilloscope_connected:
             try:
@@ -902,7 +867,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def enable_oscilloscope_channel(self):
         if self.oscilloscope_connected:
             try:
@@ -912,7 +876,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def disable_oscilloscope_channel(self):
         if self.oscilloscope_connected:
             try:
@@ -921,7 +884,6 @@ class DeviceManager:
                 self.update_oscilloscope_status()
             except:
                 pass
-
 
     def set_oscilloscope_timebase(self, entry):
         if not self.oscilloscope_connected:
@@ -935,7 +897,6 @@ class DeviceManager:
             self.update_oscilloscope_status()
 
         threading.Thread(target=task, daemon=True).start()
-
 
     def set_oscilloscope_average_count(self, entry):
         if not self.oscilloscope_connected:
@@ -952,7 +913,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_oscilloscope_trigger_source(self, combobox):
         if self.oscilloscope_connected:
             try:
@@ -961,7 +921,6 @@ class DeviceManager:
                 self.update_oscilloscope_status()
             except:
                 pass
-
 
     def set_oscilloscope_trigger_level(self, entry):
         if not self.oscilloscope_connected:
@@ -976,7 +935,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def set_oscilloscope_trigger_slope(self, combobox):
         if self.oscilloscope_connected:
             try:
@@ -985,7 +943,6 @@ class DeviceManager:
                 self.update_oscilloscope_status()
             except:
                 pass
-
 
     def set_oscilloscope_impedance(self, combobox):
         if self.oscilloscope_connected:
@@ -1003,14 +960,12 @@ class DeviceManager:
             except:
                 pass
 
-
     def run_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
             try:
                 self.oscilloscope_device.run_acquisition()
             except:
                 pass
-
 
     def stop_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
@@ -1019,7 +974,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def single_oscilloscope_acquisition(self):
         if self.oscilloscope_connected:
             try:
@@ -1027,14 +981,12 @@ class DeviceManager:
             except:
                 pass
 
-
     def force_oscilloscope_trigger(self):
         if self.oscilloscope_connected:
             try:
                 self.oscilloscope_device.force_trigger()
             except:
                 pass
-
 
     def capture_waveform(self, averaged=False, average_count=64):
         if not self.oscilloscope_connected or not self.oscilloscope_device:
@@ -1061,7 +1013,6 @@ class DeviceManager:
             return None, None
         except:
             return None, None
-
 
     def save_waveform_to_csv(self, time_values, voltage_values, filename=None):
         if not time_values or not voltage_values:
@@ -1100,7 +1051,6 @@ class DeviceManager:
             return file_path
         except:
             return None
-
 
     def save_waveform_to_png(self, time_values, voltage_values, filename=None):
         if not time_values or not voltage_values:
@@ -1144,7 +1094,6 @@ class DeviceManager:
         except:
             return None
 
-
     def capture_and_save_waveform(self, averaged=False, average_count=64, format_type="both"):
         def task():
             try:
@@ -1186,10 +1135,8 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def capture_and_save_normal_waveform(self):
         self.capture_and_save_waveform(averaged=False, format_type="both")
-
 
     def capture_and_save_averaged_waveform(self):
         average_count = 64
@@ -1202,14 +1149,11 @@ class DeviceManager:
 
         self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="both")
 
-
     def capture_and_save_normal_waveform_csv(self):
         self.capture_and_save_waveform(averaged=False, format_type="csv")
 
-
     def capture_and_save_normal_waveform_png(self):
         self.capture_and_save_waveform(averaged=False, format_type="png")
-
 
     def capture_and_save_averaged_waveform_csv(self):
         average_count = 64
@@ -1222,7 +1166,6 @@ class DeviceManager:
 
         self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="csv")
 
-
     def capture_and_save_averaged_waveform_png(self):
         average_count = 64
 
@@ -1234,7 +1177,6 @@ class DeviceManager:
 
         self.capture_and_save_waveform(averaged=True, average_count=average_count, format_type="png")
 
-
     def refresh_energymeter_power(self):
         if self.energymeter_connected:
             try:
@@ -1242,7 +1184,6 @@ class DeviceManager:
                 self._safe_label_configuration(self.status_labels.get("energymeter_power"), text=f"{power:.6e} Вт")
             except:
                 pass
-
 
     def measure_average_energymeter_power(self):
         if not self.energymeter_connected:
@@ -1258,7 +1199,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def increase_energymeter_scale(self):
         if self.energymeter_connected:
             try:
@@ -1267,7 +1207,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def decrease_energymeter_scale(self):
         if self.energymeter_connected:
             try:
@@ -1275,7 +1214,6 @@ class DeviceManager:
                 self.update_energymeter_status()
             except:
                 pass
-
 
     def set_energymeter_scale(self, entry):
         if not self.energymeter_connected:
@@ -1290,7 +1228,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def enable_energymeter_autoscale(self):
         if self.energymeter_connected:
             try:
@@ -1299,7 +1236,6 @@ class DeviceManager:
             except:
                 pass
 
-
     def disable_energymeter_autoscale(self):
         if self.energymeter_connected:
             try:
@@ -1307,7 +1243,6 @@ class DeviceManager:
                 self.update_energymeter_status()
             except:
                 pass
-
 
     def set_energymeter_wavelength(self, entry):
         if not self.energymeter_connected:
@@ -1322,7 +1257,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def zero_energymeter(self):
         if self.energymeter_connected:
             try:
@@ -1330,7 +1264,6 @@ class DeviceManager:
                 self.update_energymeter_status()
             except:
                 pass
-
 
     def set_energymeter_trigger_level(self, entry):
         if not self.energymeter_connected:
@@ -1347,7 +1280,6 @@ class DeviceManager:
 
         threading.Thread(target=task, daemon=True).start()
 
-
     def create_centered_frame(self, parent, title):
         container = ttk.Frame(parent)
         container.pack(fill=tk.BOTH, expand=True)
@@ -1362,7 +1294,6 @@ class DeviceManager:
         bottom_spacer.pack(fill=tk.BOTH, expand=True)
 
         return frame
-
 
     def create_chromator_tab(self, parent):
         tab = ttk.Frame(parent)
@@ -1479,7 +1410,6 @@ class DeviceManager:
 
         return tab
 
-
     def create_laser_tab(self, parent):
         tab = ttk.Frame(parent)
         main_frame = self.create_centered_frame(tab, "Лазер:")
@@ -1578,7 +1508,6 @@ class DeviceManager:
         ttk.Button(reset_center, text="Сброс", width=18, command=self.reset_laser).pack(side=tk.LEFT, padx=5)
 
         return tab
-
 
     def create_oscilloscope_tab(self, parent):
         tab = ttk.Frame(parent)
@@ -1758,7 +1687,6 @@ class DeviceManager:
 
         return tab
 
-
     def create_energymeter_tab(self, parent):
         tab = ttk.Frame(parent)
         main_frame = self.create_centered_frame(tab, "Энергометр:")
@@ -1861,10 +1789,9 @@ class DeviceManager:
 
         return tab
 
-
     def initialize_user_interface(self):
         self.root_window = tk.Tk()
-        self.root_window.title("Управление оборудованием")
+        self.root_window.title("Device Center")
         self.root_window.geometry("700x1000")
         self.root_window.resizable(False, False)
 
@@ -1899,7 +1826,6 @@ class DeviceManager:
         self.root_window.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root_window.mainloop()
 
-
     def on_closing(self):
         self.stop_auto_update()
         self.disconnect_all_devices()
@@ -1921,7 +1847,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     try:
-        application = DeviceManager()
+        application = DeviceCenter()
         application.initialize_user_interface()
     finally:
         if lock_file and lock_file.exists():
