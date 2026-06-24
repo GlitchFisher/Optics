@@ -4,6 +4,8 @@ import time
 import ctypes
 import winreg
 import tkinter
+import usb.core
+import usb.util
 import threading
 import subprocess
 
@@ -169,6 +171,84 @@ class DriverManager:
             return result
         finally:
             ctypes.windll.kernel32.Wow64RevertWow64FsRedirection(old_redirection_value)
+
+
+    def check_and_install_winusb_auto(self, log_widget):
+        try:
+            usbtmc_devices = []
+
+            for devices in usb.core.find(find_all=True):
+                try:
+                    if devices.bDeviceClass == 0xFE:
+                        usbtmc_devices.append(devices)
+                except:
+                    continue
+
+            if not usbtmc_devices:
+                log_widget.insert(tkinter.END, f"✅ Устройства не найдены!\n")
+                log_widget.see(tkinter.END)
+
+                return False
+
+            log_widget.insert(tkinter.END, f"✅ Найдено {len(usbtmc_devices)} устройств!\n")
+            log_widget.see(tkinter.END)
+
+            need_install = False
+
+            for devices in usbtmc_devices:
+                try:
+                    devices.get_active_configuration()
+                    log_widget.insert(tkinter.END, f"✅ Драйвер устройства правильный!\n")
+                    log_widget.see(tkinter.END)
+                except usb.core.USBError:
+                    need_install = True
+                    log_widget.insert(tkinter.END, f"⚠️ Драйвер устройства неправильный!\n")
+                    log_widget.see(tkinter.END)
+                except:
+                    continue
+
+            if not need_install:
+                log_widget.insert(tkinter.END, f"✅ Все устройства уже настроены!\n")
+                log_widget.see(tkinter.END)
+
+                return True
+
+            log_widget.insert(tkinter.END, f"✅ Установка драйвера для устройств...\n")
+            log_widget.see(tkinter.END)
+
+            if getattr(sys, "frozen", False):
+                kernel_path = Path(sys._MEIPASS) / "kernel"
+            else:
+                kernel_path = self.drivers_path / "kernel"
+
+            zadig_path = kernel_path / "zadig.exe"
+
+            if not zadig_path.exists():
+                log_widget.insert(tkinter.END, f"❌ Утилита не найдена!\n")
+                log_widget.see(tkinter.END)
+
+                return False
+
+            result = subprocess.run([str(zadig_path), "/install", "/silent", "/class", "FE", "/subclass", "03", "/driver", "libusb-win32"], capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+
+            if result.returncode == 0:
+                log_widget.insert(tkinter.END, f"✅ Нужный драйвер установлен!\n")
+                log_widget.see(tkinter.END)
+                log_widget.insert(tkinter.END, f"⚠️ Переподключите осциллограф!\n")
+                log_widget.see(tkinter.END)
+
+                return True
+            else:
+                log_widget.insert(tkinter.END, f"❌ Ошибка установки драйвера!\n")
+                log_widget.see(tkinter.END)
+
+                return False
+
+        except Exception:
+            log_widget.insert(tkinter.END, f"❌ Общая ошибка!\n")
+            log_widget.see(tkinter.END)
+
+            return False
 
 
     def install_device_driver(self, device, log_widget):
@@ -371,6 +451,10 @@ class DriverManager:
                     progress_bar["value"] = index + 1
                     self.root_window.update()
                     time.sleep(0.3)
+
+                log_widget.insert(tkinter.END, "\n⚠️ Проверка сторонних устройств...\n")
+                log_widget.see(tkinter.END)
+                self.check_and_install_winusb_auto(log_widget)
 
                 log_widget.insert(tkinter.END, "Установка завершена!\n")
                 log_widget.see(tkinter.END)

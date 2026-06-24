@@ -22,14 +22,16 @@ analysis = Analysis(
     binaries=binaries,
     datas=files,
     hiddenimports=[
-        'tkinter',
-        'threading',
-        'subprocess',
-        'ctypes',
-        'winreg',
         'os',
         'sys',
-        'time'
+        'time',
+        'ctypes',
+        'winreg',
+        'tkinter',
+        'usb.core',
+        'usb.util',
+        'threading',
+        'subprocess'
     ] + imports,
     hookspath=[],
     hooksconfig={},
